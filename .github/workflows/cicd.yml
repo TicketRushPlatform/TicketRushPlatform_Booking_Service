@@ -11,7 +11,7 @@ permissions:
 
 env:
   REGISTRY_OWNER: ticketrushplatform
-  IMAGE_NAME: ticketrush-web
+  IMAGE_NAME: ticketrush-booking_api
 
 jobs:
   unit-test:
