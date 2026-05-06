@@ -5,6 +5,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY_OWNER: ticketrushplatform
+  IMAGE_NAME: ticketrush-web
+
 jobs:
   unit-test:
     runs-on: ubuntu-latest
@@ -43,44 +51,59 @@ jobs:
 
   build-and-push:
     runs-on: ubuntu-latest
-    needs: unit-test
 
     outputs:
-      image: ${{ steps.build.outputs.image }}
+      image: ${{ steps.meta.outputs.image }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: docker/login-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
-          registry: ${{ secrets.DOCKER_REGISTRY }}
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
-        id: build
+      - name: Generate image tag
+        id: meta
         run: |
-          IMAGE=${{ secrets.DOCKER_REGISTRY }}/${{ secrets.REGISTRY_PROJECT }}/ticketrush-booking_api:latest
-
+          IMAGE=ghcr.io/${{ env.REGISTRY_OWNER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           echo "image=$IMAGE" >> $GITHUB_OUTPUT
 
-          docker build -t $IMAGE .
-          docker push $IMAGE
+          echo "Using image: $IMAGE"
+
+      - name: Build image
+        run: |
+          docker build \
+            -t ${{ steps.meta.outputs.image }} \
+            .
+
+      - name: Push image
+        run: |
+          docker push ${{ steps.meta.outputs.image }}
 
   deploy:
     runs-on: ubuntu-latest
     needs: build-and-push
 
     steps:
-      - uses: appleboy/ssh-action@v1.0.3
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+
           script: |
-            IMAGE=${{ secrets.DOCKER_REGISTRY }}/${{ secrets.REGISTRY_PROJECT }}/ticketrush-booking_api:latest
+            IMAGE=${{ needs.build-and-push.outputs.image }}
 
             echo "Deploying $IMAGE"
+
+            docker login ghcr.io \
+              -u ${{ github.actor }} \
+              -p ${{ secrets.GHCR_PAT }}
 
             cd ${{ secrets.DEPLOY_PATH }}
 
