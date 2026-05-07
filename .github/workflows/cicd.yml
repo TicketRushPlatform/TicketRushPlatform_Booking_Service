@@ -111,4 +111,4 @@ jobs:
 
             docker pull $IMAGE
 
-            docker compose up -d booking_api
+            docker compose up -d --no-deps booking_api
