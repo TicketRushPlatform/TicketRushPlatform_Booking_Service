@@ -88,7 +88,6 @@ func seedShowtimeWithSeats(t *testing.T, repo BookingRepository, seatCount int) 
 			Row:       "A",
 			Number:    i + 1,
 			SeatClass: models.SeatClassStandard,
-			Price:     decimal.NewFromInt(100),
 		}
 		if err := r.db.Create(&seat).Error; err != nil {
 			t.Fatalf("create seat: %v", err)
@@ -307,6 +306,36 @@ func TestBookingRepository_CancelBooking(t *testing.T) {
 	_, err = repo.CancelBooking(expired.ID)
 	if err == nil {
 		t.Fatalf("expected expired conflict")
+	}
+}
+
+func TestBookingRepository_CancelPaidBookingDoesNotReleaseSeats(t *testing.T) {
+	repo := setupRepo(t)
+	showtimeID, _, seatIDs := seedShowtimeWithSeats(t, repo, 1)
+
+	booking, err := repo.HoldSeats(dto.HoldSeatsRequest{
+		UserID:     uuid.New(),
+		ShowtimeID: showtimeID,
+		SeatIDs:    seatIDs,
+	})
+	if err != nil {
+		t.Fatalf("HoldSeats err=%v", err)
+	}
+
+	if _, err := repo.ConfirmBooking(booking.ID); err != nil {
+		t.Fatalf("ConfirmBooking err=%v", err)
+	}
+
+	if _, err := repo.CancelBooking(booking.ID); err == nil {
+		t.Fatalf("expected paid booking conflict")
+	}
+
+	seats, err := repo.GetSeatsStatus(showtimeID)
+	if err != nil {
+		t.Fatalf("GetSeatsStatus err=%v", err)
+	}
+	if len(seats) != 1 || seats[0].Status != models.ShowTimeSeatStatusSold {
+		t.Fatalf("expected paid booking seat to stay SOLD")
 	}
 }
 

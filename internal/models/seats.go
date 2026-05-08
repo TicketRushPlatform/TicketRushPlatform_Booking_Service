@@ -2,7 +2,6 @@ package models
 
 import (
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 )
 
 type SeatClass string
@@ -23,8 +22,6 @@ type Seat struct {
 	Number int    `gorm:"not null;uniqueIndex:idx_seat_unique" json:"number"`
 
 	SeatClass SeatClass `gorm:"type:varchar(20);not null;index" json:"seat_class"`
-
-	Price decimal.Decimal `gorm:"type:numeric(10,2);not null" json:"price"`
 
 	SeatMap SeatMap `gorm:"foreignKey:SeatMapID"`
 }

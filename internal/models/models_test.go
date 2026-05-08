@@ -44,3 +44,9 @@ func TestBookingToDTO(t *testing.T) {
 		t.Fatalf("unexpected dto: %+v", dto)
 	}
 }
+
+func TestSeatPricingTableNameMatchesMigration(t *testing.T) {
+	if got := (SeatPricing{}).TableName(); got != "seat_pricing" {
+		t.Fatalf("SeatPricing table name = %q, want %q", got, "seat_pricing")
+	}
+}

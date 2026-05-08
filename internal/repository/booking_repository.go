@@ -5,6 +5,7 @@ import (
 	"booking_api/internal/dto"
 	"booking_api/internal/models"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -97,7 +98,37 @@ func (r *bookingRepository) HoldSeats(req dto.HoldSeatsRequest) (*models.Booking
 		}
 
 		if len(seats) != len(req.SeatIDs) {
-			return apperror.NewConflict("some seats are not available")
+			var conflicted []models.ShowTimeSeat
+			if err := tx.
+				Preload("Seat").
+				Where("show_time_id = ? AND seat_id IN ?", req.ShowtimeID, req.SeatIDs).
+				Where(`
+					NOT (
+						status = ?
+						OR (status = ? AND expires_at < ?)
+					)
+				`, models.ShowTimeSeatStatusAvailable, models.ShowTimeSeatStatusHolding, now).
+				Order("seat_id").
+				Find(&conflicted).Error; err != nil {
+				return apperror.NewConflict("some seats are not available")
+			}
+
+			if len(conflicted) == 0 {
+				return apperror.NewConflict("some seats are not available")
+			}
+
+			conflictedLabels := make([]string, 0, len(conflicted))
+			for _, seat := range conflicted {
+				if seat.Seat.Row == "" {
+					conflictedLabels = append(conflictedLabels, seat.SeatID.String())
+					continue
+				}
+				conflictedLabels = append(conflictedLabels, fmt.Sprintf("%s%d", seat.Seat.Row, seat.Seat.Number))
+			}
+
+			return apperror.NewConflict(
+				fmt.Sprintf("seat(s) %s were already held by another buyer", strings.Join(conflictedLabels, ", ")),
+			)
 		}
 
 		booking = &models.Booking{
@@ -197,7 +228,9 @@ func (r *bookingRepository) ConfirmBooking(bookingID uuid.UUID) (*models.Booking
 			return apperror.NewConflict("booking hold has expired")
 		}
 
-		if err := tx.Model(&booking).Updates(map[string]interface{}{
+		if err := tx.Model(&models.Booking{}).
+			Where("id = ?", booking.ID).
+			Updates(map[string]interface{}{
 			"status":     models.BookingStatusPaid,
 			"expires_at": nil,
 		}).Error; err != nil {
@@ -255,7 +288,15 @@ func (r *bookingRepository) CancelBooking(bookingID uuid.UUID) (*models.Booking,
 			return apperror.NewConflict("booking has already expired")
 		}
 
-		if err := tx.Model(&booking).Updates(map[string]interface{}{
+		if booking.Status != models.BookingStatusHolding {
+			return apperror.NewConflict(
+				fmt.Sprintf("booking cannot be canceled, current status: %s", booking.Status),
+			)
+		}
+
+		if err := tx.Model(&models.Booking{}).
+			Where("id = ?", booking.ID).
+			Updates(map[string]interface{}{
 			"status":     models.BookingStatusCanceled,
 			"expires_at": nil,
 		}).Error; err != nil {

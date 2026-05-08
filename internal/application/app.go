@@ -6,6 +6,7 @@ import (
 	"booking_api/internal/handler"
 	"booking_api/internal/infrastructure/database"
 	"booking_api/internal/infrastructure/logger"
+	"booking_api/internal/infrastructure/redislock"
 	"booking_api/internal/middleware"
 	"booking_api/internal/repository"
 	"booking_api/internal/server"
@@ -13,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
@@ -25,6 +27,8 @@ type App struct {
 	server   *server.HTTPServer
 	db       *gorm.DB
 	logger   *zap.Logger
+	seatLock *redislock.SeatLocker
+	handler  *handler.BookingHandler
 	stopOnce sync.Once
 }
 
@@ -48,15 +52,26 @@ func NewApp(cfg config.Config) (*App, error) {
 	}
 
 	// ---- Wire dependencies ----
+	var seatLocker *redislock.SeatLocker
+	if cfg.Redis.Addr != "" {
+		redisClient := redislock.NewClient(cfg.Redis)
+		seatLocker = redislock.NewSeatLocker(redisClient, cfg.Redis.TTL)
+	}
+
 	bookingRepo := repository.NewBookingRepository(db, zapLogger)
-	bookingService := services.NewBookingService(zapLogger, bookingRepo)
+	bookingService := services.NewBookingServiceWithSeatLocker(zapLogger, bookingRepo, seatLocker)
 	bookingHandler := handler.NewBookingHandler(bookingService, zapLogger)
+	bookingHandler.StartExpiredHoldReleaser(15 * time.Second)
 
 	// ---- Register middleware ----
 	router := srv.Router()
 	router.Use(middleware.CORS())
 	router.Use(middleware.RequestID())
 	router.Use(middleware.RequestLogger(zapLogger))
+	router.Use(middleware.RequireAuth(middleware.AuthConfig{
+		JWTSecret:    cfg.Auth.JWTSecret,
+		JWTAlgorithm: cfg.Auth.JWTAlgorithm,
+	}))
 	router.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	// ---- Register routes ----
@@ -66,10 +81,12 @@ func NewApp(cfg config.Config) (*App, error) {
 	zapLogger.Info("application initialized successfully")
 
 	return &App{
-		config: cfg,
-		logger: zapLogger,
-		server: srv,
-		db:     db,
+		config:   cfg,
+		logger:   zapLogger,
+		server:   srv,
+		db:       db,
+		seatLock: seatLocker,
+		handler:  bookingHandler,
 	}, nil
 }
 
@@ -113,6 +130,12 @@ func (app *App) cleanup() {
 		sqlDB, err := app.db.DB()
 		if err == nil {
 			_ = sqlDB.Close()
+		}
+		if app.seatLock != nil {
+			_ = app.seatLock.Close()
+		}
+		if app.handler != nil {
+			app.handler.StopExpiredHoldReleaser()
 		}
 	})
 }

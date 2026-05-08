@@ -3,7 +3,9 @@ package config
 import (
 	"booking_api/internal/infrastructure/database"
 	"booking_api/internal/infrastructure/logger"
+	"booking_api/internal/infrastructure/redislock"
 	"booking_api/internal/server"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -12,6 +14,13 @@ type Config struct {
 	Logger   logger.Config
 	Server   server.ServerConfig
 	Postgres database.PostgresConfig
+	Redis    redislock.Config
+	Auth     AuthConfig
+}
+
+type AuthConfig struct {
+	JWTSecret    string
+	JWTAlgorithm string
 }
 
 func NewConfig() Config {
@@ -41,5 +50,23 @@ func NewConfig() Config {
 		Logger: logger.Config{
 			Level: v.GetString("LOG_LEVEL"),
 		},
+
+		Redis: redislock.Config{
+			Addr:     v.GetString("REDIS_ADDR"),
+			Password: v.GetString("REDIS_PASSWORD"),
+			DB:       v.GetInt("REDIS_DB"),
+			TTL:      time.Duration(v.GetInt("REDIS_SEAT_LOCK_TTL_SECONDS")) * time.Second,
+		},
+		Auth: AuthConfig{
+			JWTSecret:    getStringOrDefault(v.GetString("JWT_SECRET"), "dev-only-secret"),
+			JWTAlgorithm: getStringOrDefault(v.GetString("JWT_ALGORITHM"), "HS256"),
+		},
 	}
+}
+
+func getStringOrDefault(value string, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }

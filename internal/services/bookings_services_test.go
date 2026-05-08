@@ -1,10 +1,13 @@
 package services
 
 import (
+	"booking_api/internal/apperror"
 	"booking_api/internal/dto"
 	"booking_api/internal/models"
+	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,7 +17,92 @@ import (
 	"go.uber.org/zap"
 )
 
+type seatLockerMock struct {
+	lockFn       func(ctx context.Context, showtimeID uuid.UUID, seatIDs []uuid.UUID, owner string) (bool, error)
+	unlockFn     func(ctx context.Context, showtimeID uuid.UUID, seatIDs []uuid.UUID, owner string) error
+	lockCalls    int
+	unlockCalls  int
+	lastSeatIDs  []uuid.UUID
+	lastOwner    string
+	unlockOwners []string
+}
+
+func (m *seatLockerMock) LockSeats(ctx context.Context, showtimeID uuid.UUID, seatIDs []uuid.UUID, owner string) (bool, error) {
+	m.lockCalls++
+	m.lastSeatIDs = append([]uuid.UUID(nil), seatIDs...)
+	m.lastOwner = owner
+	if m.lockFn != nil {
+		return m.lockFn(ctx, showtimeID, seatIDs, owner)
+	}
+	return true, nil
+}
+
+func (m *seatLockerMock) UnlockSeats(ctx context.Context, showtimeID uuid.UUID, seatIDs []uuid.UUID, owner string) error {
+	m.unlockCalls++
+	m.unlockOwners = append(m.unlockOwners, owner)
+	if m.unlockFn != nil {
+		return m.unlockFn(ctx, showtimeID, seatIDs, owner)
+	}
+	return nil
+}
+
+type concurrentSeatLocker struct {
+	mu           sync.Mutex
+	owners       map[string]string
+	totalCalls   int
+	lockCalls    int
+	unlockCalls  int
+	allAttempted chan struct{}
+	closeOnce    sync.Once
+}
+
+func newConcurrentSeatLocker(totalCalls int) *concurrentSeatLocker {
+	return &concurrentSeatLocker{
+		owners:       make(map[string]string),
+		totalCalls:   totalCalls,
+		allAttempted: make(chan struct{}),
+	}
+}
+
+func (l *concurrentSeatLocker) LockSeats(ctx context.Context, showtimeID uuid.UUID, seatIDs []uuid.UUID, owner string) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.lockCalls++
+	if l.lockCalls >= l.totalCalls {
+		l.closeOnce.Do(func() { close(l.allAttempted) })
+	}
+
+	for _, seatID := range seatIDs {
+		if _, exists := l.owners[showtimeID.String()+":"+seatID.String()]; exists {
+			return false, nil
+		}
+	}
+
+	for _, seatID := range seatIDs {
+		l.owners[showtimeID.String()+":"+seatID.String()] = owner
+	}
+
+	return true, nil
+}
+
+func (l *concurrentSeatLocker) UnlockSeats(ctx context.Context, showtimeID uuid.UUID, seatIDs []uuid.UUID, owner string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.unlockCalls++
+	for _, seatID := range seatIDs {
+		key := showtimeID.String() + ":" + seatID.String()
+		if l.owners[key] == owner {
+			delete(l.owners, key)
+		}
+	}
+
+	return nil
+}
+
 type bookingRepoMock struct {
+	mu                   sync.Mutex
 	holdSeatsFn          func(req dto.HoldSeatsRequest) (*models.Booking, error)
 	confirmBookingFn     func(bookingID uuid.UUID) (*models.Booking, error)
 	cancelBookingFn      func(bookingID uuid.UUID) (*models.Booking, error)
@@ -33,38 +121,52 @@ type bookingRepoMock struct {
 }
 
 func (m *bookingRepoMock) HoldSeats(req dto.HoldSeatsRequest) (*models.Booking, error) {
+	m.mu.Lock()
 	m.holdSeatsCallCount++
 	m.lastHoldSeatsRequest = req
+	m.mu.Unlock()
 	return m.holdSeatsFn(req)
 }
 
 func (m *bookingRepoMock) ConfirmBooking(bookingID uuid.UUID) (*models.Booking, error) {
+	m.mu.Lock()
 	m.confirmCallCount++
+	m.mu.Unlock()
 	return m.confirmBookingFn(bookingID)
 }
 
 func (m *bookingRepoMock) CancelBooking(bookingID uuid.UUID) (*models.Booking, error) {
+	m.mu.Lock()
 	m.cancelCallCount++
+	m.mu.Unlock()
 	return m.cancelBookingFn(bookingID)
 }
 
 func (m *bookingRepoMock) GetBookingByID(bookingID uuid.UUID) (*models.Booking, error) {
+	m.mu.Lock()
 	m.getByIDCallCount++
+	m.mu.Unlock()
 	return m.getBookingByIDFn(bookingID)
 }
 
 func (m *bookingRepoMock) GetBookingsByUser(userID uuid.UUID, page, pageSize int) ([]models.Booking, int64, error) {
+	m.mu.Lock()
 	m.getByUserCallCount++
+	m.mu.Unlock()
 	return m.getBookingsByUserFn(userID, page, pageSize)
 }
 
 func (m *bookingRepoMock) GetSeatsStatus(showtimeID uuid.UUID) ([]models.ShowTimeSeat, error) {
+	m.mu.Lock()
 	m.getSeatsCallCount++
+	m.mu.Unlock()
 	return m.getSeatsStatusFn(showtimeID)
 }
 
 func (m *bookingRepoMock) ReleaseExpiredHolds() (int64, error) {
+	m.mu.Lock()
 	m.releaseCallCount++
+	m.mu.Unlock()
 	return m.releaseExpiredFn()
 }
 
@@ -226,6 +328,356 @@ func TestBookingService_HoldSeats(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBookingService_HoldSeatsWithSeatLocker(t *testing.T) {
+	seat1 := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	seat2 := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+	lockErr := errors.New("redis unavailable")
+
+	tests := []struct {
+		name            string
+		repo            *bookingRepoMock
+		locker          *seatLockerMock
+		wantErr         string
+		wantAppErrCode  int
+		wantRepoCalls   int
+		wantLockCalls   int
+		wantUnlockCalls int
+	}{
+		{
+			name: "lock success calls repository and unlocks",
+			repo: &bookingRepoMock{
+				holdSeatsFn: func(req dto.HoldSeatsRequest) (*models.Booking, error) {
+					return buildBooking(), nil
+				},
+			},
+			locker:          &seatLockerMock{},
+			wantRepoCalls:   1,
+			wantLockCalls:   1,
+			wantUnlockCalls: 1,
+		},
+		{
+			name: "lock conflict skips repository",
+			repo: &bookingRepoMock{
+				holdSeatsFn: func(req dto.HoldSeatsRequest) (*models.Booking, error) {
+					t.Fatalf("repository should not be called when redis lock conflicts")
+					return nil, nil
+				},
+			},
+			locker: &seatLockerMock{
+				lockFn: func(ctx context.Context, showtimeID uuid.UUID, seatIDs []uuid.UUID, owner string) (bool, error) {
+					return false, nil
+				},
+			},
+			wantErr:        "some seats are being held",
+			wantAppErrCode: 409,
+			wantLockCalls:  1,
+		},
+		{
+			name: "lock error skips repository",
+			repo: &bookingRepoMock{
+				holdSeatsFn: func(req dto.HoldSeatsRequest) (*models.Booking, error) {
+					t.Fatalf("repository should not be called when redis lock errors")
+					return nil, nil
+				},
+			},
+			locker: &seatLockerMock{
+				lockFn: func(ctx context.Context, showtimeID uuid.UUID, seatIDs []uuid.UUID, owner string) (bool, error) {
+					return false, lockErr
+				},
+			},
+			wantErr:       "failed to acquire seat lock",
+			wantLockCalls: 1,
+		},
+		{
+			name: "repository error still unlocks",
+			repo: &bookingRepoMock{
+				holdSeatsFn: func(req dto.HoldSeatsRequest) (*models.Booking, error) {
+					return nil, errors.New("db unavailable")
+				},
+			},
+			locker:          &seatLockerMock{},
+			wantErr:         "failed to hold seats",
+			wantRepoCalls:   1,
+			wantLockCalls:   1,
+			wantUnlockCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := NewBookingServiceWithSeatLocker(zap.NewNop(), tt.repo, tt.locker)
+			req := dto.HoldSeatsRequest{
+				UserID:     uuid.New(),
+				ShowtimeID: uuid.New(),
+				SeatIDs:    []uuid.UUID{seat2, seat1},
+			}
+
+			_, err := svc.HoldSeats(req)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+				}
+				if tt.wantAppErrCode != 0 {
+					var appErr *apperror.AppError
+					if !errors.As(err, &appErr) || appErr.Code != tt.wantAppErrCode {
+						t.Fatalf("expected app error code %d, got %v", tt.wantAppErrCode, err)
+					}
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if tt.repo.holdSeatsCallCount != tt.wantRepoCalls {
+				t.Fatalf("repo calls = %d, want %d", tt.repo.holdSeatsCallCount, tt.wantRepoCalls)
+			}
+			if tt.locker.lockCalls != tt.wantLockCalls {
+				t.Fatalf("lock calls = %d, want %d", tt.locker.lockCalls, tt.wantLockCalls)
+			}
+			if tt.locker.unlockCalls != tt.wantUnlockCalls {
+				t.Fatalf("unlock calls = %d, want %d", tt.locker.unlockCalls, tt.wantUnlockCalls)
+			}
+			if tt.wantLockCalls > 0 && len(tt.locker.lastSeatIDs) == 2 {
+				if tt.locker.lastSeatIDs[0] != seat1 || tt.locker.lastSeatIDs[1] != seat2 {
+					t.Fatalf("locker seat ids not sorted: got %v", tt.locker.lastSeatIDs)
+				}
+			}
+			if tt.wantUnlockCalls > 0 && tt.locker.unlockOwners[0] != tt.locker.lastOwner {
+				t.Fatalf("unlock owner = %q, want %q", tt.locker.unlockOwners[0], tt.locker.lastOwner)
+			}
+		})
+	}
+}
+
+func TestBookingService_HoldSeatsConcurrentUsersSameSeat(t *testing.T) {
+	const userCount = 20
+
+	showtimeID := uuid.New()
+	seatID := uuid.New()
+	locker := newConcurrentSeatLocker(userCount)
+
+	var repoMu sync.Mutex
+	seatHeld := false
+	repo := &bookingRepoMock{
+		holdSeatsFn: func(req dto.HoldSeatsRequest) (*models.Booking, error) {
+			repoMu.Lock()
+			defer repoMu.Unlock()
+
+			if seatHeld {
+				return nil, apperror.NewConflict("some seats are not available")
+			}
+
+			seatHeld = true
+			select {
+			case <-locker.allAttempted:
+			case <-time.After(time.Second):
+				return nil, errors.New("timed out waiting for concurrent lock attempts")
+			}
+
+			booking := buildBooking()
+			booking.UserID = req.UserID
+			booking.ShowTimeID = req.ShowtimeID
+			return booking, nil
+		},
+	}
+
+	svc := NewBookingServiceWithSeatLocker(zap.NewNop(), repo, locker)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	var resultMu sync.Mutex
+	successes := 0
+	conflicts := 0
+	failures := 0
+
+	for i := 0; i < userCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+
+			_, err := svc.HoldSeats(dto.HoldSeatsRequest{
+				UserID:     uuid.New(),
+				ShowtimeID: showtimeID,
+				SeatIDs:    []uuid.UUID{seatID},
+			})
+
+			resultMu.Lock()
+			defer resultMu.Unlock()
+
+			if err == nil {
+				successes++
+				return
+			}
+
+			var appErr *apperror.AppError
+			if errors.As(err, &appErr) && appErr.Code == 409 {
+				conflicts++
+				return
+			}
+
+			failures++
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	if successes != 1 {
+		t.Fatalf("successes = %d, want 1", successes)
+	}
+	if conflicts != userCount-1 {
+		t.Fatalf("conflicts = %d, want %d", conflicts, userCount-1)
+	}
+	if failures != 0 {
+		t.Fatalf("failures = %d, want 0", failures)
+	}
+	if repo.holdSeatsCallCount != 1 {
+		t.Fatalf("repository HoldSeats calls = %d, want 1", repo.holdSeatsCallCount)
+	}
+	if locker.lockCalls != userCount {
+		t.Fatalf("seat lock calls = %d, want %d", locker.lockCalls, userCount)
+	}
+	if locker.unlockCalls != 1 {
+		t.Fatalf("seat unlock calls = %d, want 1", locker.unlockCalls)
+	}
+}
+
+func TestBookingService_HoldSeatsConcurrentUsersOverlappingSeats(t *testing.T) {
+	showtimeID := uuid.New()
+	seatA := uuid.MustParse("00000000-0000-0000-0000-00000000000a")
+	seatB := uuid.MustParse("00000000-0000-0000-0000-00000000000b")
+	seatC := uuid.MustParse("00000000-0000-0000-0000-00000000000c")
+	locker := newConcurrentSeatLocker(2)
+
+	var repoMu sync.Mutex
+	heldSeats := make(map[uuid.UUID]struct{})
+	successfulSeatIDs := make([]uuid.UUID, 0, 2)
+	repo := &bookingRepoMock{
+		holdSeatsFn: func(req dto.HoldSeatsRequest) (*models.Booking, error) {
+			repoMu.Lock()
+			defer repoMu.Unlock()
+
+			for _, seatID := range req.SeatIDs {
+				if _, exists := heldSeats[seatID]; exists {
+					return nil, apperror.NewConflict("some seats are not available")
+				}
+			}
+
+			for _, seatID := range req.SeatIDs {
+				heldSeats[seatID] = struct{}{}
+			}
+			successfulSeatIDs = append(successfulSeatIDs, req.SeatIDs...)
+
+			select {
+			case <-locker.allAttempted:
+			case <-time.After(time.Second):
+				return nil, errors.New("timed out waiting for overlapping lock attempts")
+			}
+
+			booking := buildBooking()
+			booking.UserID = req.UserID
+			booking.ShowTimeID = req.ShowtimeID
+			return booking, nil
+		},
+	}
+
+	svc := NewBookingServiceWithSeatLocker(zap.NewNop(), repo, locker)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	type holdResult struct {
+		name string
+		err  error
+	}
+	results := make(chan holdResult, 2)
+
+	requests := []struct {
+		name    string
+		seatIDs []uuid.UUID
+	}{
+		{name: "first user A,B", seatIDs: []uuid.UUID{seatA, seatB}},
+		{name: "second user B,C", seatIDs: []uuid.UUID{seatB, seatC}},
+	}
+
+	for _, request := range requests {
+		request := request
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+
+			_, err := svc.HoldSeats(dto.HoldSeatsRequest{
+				UserID:     uuid.New(),
+				ShowtimeID: showtimeID,
+				SeatIDs:    request.seatIDs,
+			})
+			results <- holdResult{name: request.name, err: err}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	conflicts := 0
+	failures := 0
+	for result := range results {
+		if result.err == nil {
+			successes++
+			continue
+		}
+
+		var appErr *apperror.AppError
+		if errors.As(result.err, &appErr) && appErr.Code == 409 {
+			conflicts++
+			continue
+		}
+
+		t.Logf("%s failed with unexpected error: %v", result.name, result.err)
+		failures++
+	}
+
+	if successes != 1 {
+		t.Fatalf("successes = %d, want 1", successes)
+	}
+	if conflicts != 1 {
+		t.Fatalf("conflicts = %d, want 1", conflicts)
+	}
+	if failures != 0 {
+		t.Fatalf("failures = %d, want 0", failures)
+	}
+	if repo.holdSeatsCallCount != 1 {
+		t.Fatalf("repository HoldSeats calls = %d, want 1", repo.holdSeatsCallCount)
+	}
+	if locker.lockCalls != 2 {
+		t.Fatalf("seat lock calls = %d, want 2", locker.lockCalls)
+	}
+	if locker.unlockCalls != 1 {
+		t.Fatalf("seat unlock calls = %d, want 1", locker.unlockCalls)
+	}
+	if len(successfulSeatIDs) != 2 {
+		t.Fatalf("successful seat count = %d, want 2", len(successfulSeatIDs))
+	}
+
+	successSet := map[uuid.UUID]struct{}{}
+	for _, seatID := range successfulSeatIDs {
+		successSet[seatID] = struct{}{}
+	}
+	_, hasA := successSet[seatA]
+	_, hasB := successSet[seatB]
+	_, hasC := successSet[seatC]
+	if !(hasB && (hasA != hasC)) {
+		t.Fatalf("successful hold must be exactly A,B or B,C, got %v", successfulSeatIDs)
+	}
+
+	locker.mu.Lock()
+	defer locker.mu.Unlock()
+	if len(locker.owners) != 0 {
+		t.Fatalf("expected no leftover or partial redis locks, got %v", locker.owners)
 	}
 }
 

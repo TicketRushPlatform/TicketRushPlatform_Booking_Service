@@ -46,7 +46,8 @@ func (m *bookingServiceMock) ReleaseExpiredHolds() (int64, error) { return m.rel
 func TestBookingHandler_SuccessRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	id := uuid.New()
-	bookingRes := &dto.BookingResponse{ID: id.String(), ShowTimeID: uuid.New().String(), Status: "HOLDING", CreatedAt: time.Now()}
+	authUserID := uuid.New()
+	bookingRes := &dto.BookingResponse{ID: id.String(), UserID: authUserID.String(), ShowTimeID: uuid.New().String(), Status: "HOLDING", CreatedAt: time.Now()}
 
 	svc := &bookingServiceMock{
 		holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return bookingRes, nil },
@@ -64,10 +65,19 @@ func TestBookingHandler_SuccessRoutes(t *testing.T) {
 
 	h := NewBookingHandler(svc, zap.NewNop())
 	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("auth_user_id", authUserID)
+		if c.Request.URL.Path == "/api/v1/bookings/release-expired" {
+			c.Set("auth_role", "ADMIN")
+		} else {
+			c.Set("auth_role", "BOOKING_OWNER")
+		}
+		c.Next()
+	})
 	v1 := r.Group("/api/v1")
 	h.RegisterRoutes(v1)
 
-	userID := uuid.New()
+	userID := authUserID
 	showtimeID := uuid.New()
 
 	tests := []struct {
@@ -101,6 +111,8 @@ func TestBookingHandler_SuccessRoutes(t *testing.T) {
 
 func TestBookingHandler_ErrorPaths(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	authUserID := uuid.New()
+	ownedBooking := &dto.BookingResponse{ID: uuid.NewString(), UserID: authUserID.String(), ShowTimeID: uuid.NewString(), Status: "HOLDING", CreatedAt: time.Now()}
 	svc := &bookingServiceMock{
 		holdFn: func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) {
 			return nil, apperror.NewBadRequest("bad")
@@ -108,8 +120,8 @@ func TestBookingHandler_ErrorPaths(t *testing.T) {
 		confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) {
 			return nil, apperror.NewNotFound("not found")
 		},
+		getFn:    func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return ownedBooking, nil },
 		cancelFn: func(bookingID uuid.UUID) error { return errors.New("boom") },
-		getFn:    func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("boom") },
 		getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
 			return nil, 0, errors.New("boom")
 		},
@@ -118,6 +130,11 @@ func TestBookingHandler_ErrorPaths(t *testing.T) {
 	}
 	h := NewBookingHandler(svc, zap.NewNop())
 	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("auth_user_id", authUserID)
+		c.Set("auth_role", "ADMIN")
+		c.Next()
+	})
 	v1 := r.Group("/api/v1")
 	h.RegisterRoutes(v1)
 
