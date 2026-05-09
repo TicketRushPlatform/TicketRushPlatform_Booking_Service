@@ -23,6 +23,7 @@ type BookingRepository interface {
 	GetBookingsByUser(userID uuid.UUID, page, pageSize int) ([]models.Booking, int64, error)
 	GetSeatsStatus(showtimeID uuid.UUID) ([]models.ShowTimeSeat, error)
 	ReleaseExpiredHolds() (int64, error)
+	GetDashboardStats() (*dto.DashboardStatsResponse, error)
 }
 
 type bookingRepository struct {
@@ -434,4 +435,111 @@ func (r *bookingRepository) ReleaseExpiredHolds() (int64, error) {
 	})
 
 	return totalReleased, err
+}
+
+// ---------- GetDashboardStats ----------
+
+func (r *bookingRepository) GetDashboardStats() (*dto.DashboardStatsResponse, error) {
+	stats := &dto.DashboardStatsResponse{}
+
+	// ---- Booking counts by status ----
+	type statusCount struct {
+		Status string
+		Count  int64
+	}
+	var statusCounts []statusCount
+	if err := r.db.Model(&models.Booking{}).
+		Where("deleted_at IS NULL").
+		Select("status, COUNT(*) as count").
+		Group("status").
+		Scan(&statusCounts).Error; err != nil {
+		return nil, apperror.NewInternal("failed to count bookings by status", err)
+	}
+	for _, sc := range statusCounts {
+		stats.TotalBookings += sc.Count
+		switch models.BookingStatus(sc.Status) {
+		case models.BookingStatusPaid:
+			stats.PaidBookings = sc.Count
+		case models.BookingStatusHolding:
+			stats.HoldingBookings = sc.Count
+		case models.BookingStatusCanceled:
+			stats.CanceledBookings = sc.Count
+		case models.BookingStatusExpired:
+			stats.ExpiredBookings = sc.Count
+		}
+	}
+
+	// ---- Seat counts by status ----
+	type seatStatusCount struct {
+		Status string
+		Count  int64
+	}
+	var seatCounts []seatStatusCount
+	if err := r.db.Model(&models.ShowTimeSeat{}).
+		Select("status, COUNT(*) as count").
+		Group("status").
+		Scan(&seatCounts).Error; err != nil {
+		return nil, apperror.NewInternal("failed to count seats by status", err)
+	}
+	for _, sc := range seatCounts {
+		stats.TotalSeats += sc.Count
+		switch models.ShowTimeSeatStatus(sc.Status) {
+		case models.ShowTimeSeatStatusAvailable:
+			stats.AvailableSeats = sc.Count
+		case models.ShowTimeSeatStatusHolding:
+			stats.HoldingSeats = sc.Count
+		case models.ShowTimeSeatStatusSold:
+			stats.SoldSeats = sc.Count
+			stats.TicketsSold = sc.Count
+		}
+	}
+
+	// ---- Total revenue from PAID bookings ----
+	type revenueResult struct {
+		Total float64
+	}
+	var revResult revenueResult
+	if err := r.db.Model(&models.BookingItem{}).
+		Joins("JOIN bookings ON bookings.id = booking_items.booking_id").
+		Where("bookings.status = ? AND bookings.deleted_at IS NULL", models.BookingStatusPaid).
+		Select("COALESCE(SUM(booking_items.price), 0) as total").
+		Scan(&revResult).Error; err != nil {
+		return nil, apperror.NewInternal("failed to sum revenue", err)
+	}
+	stats.TotalRevenue = revResult.Total
+
+	// ---- Daily revenue series for last 7 days ----
+	type dailyRevenue struct {
+		Day     string
+		Revenue float64
+	}
+	var dailySeries []dailyRevenue
+	sevenDaysAgo := time.Now().UTC().AddDate(0, 0, -6).Truncate(24 * time.Hour)
+	if err := r.db.Model(&models.BookingItem{}).
+		Joins("JOIN bookings ON bookings.id = booking_items.booking_id").
+		Where("bookings.status = ? AND bookings.deleted_at IS NULL AND bookings.created_at >= ?",
+			models.BookingStatusPaid, sevenDaysAgo).
+		Select("TO_CHAR(DATE(bookings.created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') as day, COALESCE(SUM(booking_items.price), 0) as revenue").
+		Group("day").
+		Order("day ASC").
+		Scan(&dailySeries).Error; err != nil {
+		return nil, apperror.NewInternal("failed to query daily revenue", err)
+	}
+
+	// Build a complete 7-day series with zero-fills for missing days
+	revenueByDay := make(map[string]float64, len(dailySeries))
+	for _, d := range dailySeries {
+		revenueByDay[d.Day] = d.Revenue
+	}
+	series := make([]dto.DashboardRevenuePoint, 0, 7)
+	for i := 6; i >= 0; i-- {
+		day := time.Now().UTC().AddDate(0, 0, -i).Format("2006-01-02")
+		series = append(series, dto.DashboardRevenuePoint{
+			Date:    day,
+			Revenue: revenueByDay[day],
+		})
+	}
+	stats.RevenueSeries = series
+
+	return stats, nil
 }

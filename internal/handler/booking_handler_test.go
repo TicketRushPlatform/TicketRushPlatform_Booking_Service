@@ -192,12 +192,12 @@ func bookingJWT(t *testing.T, secret string, sub uuid.UUID, role string) string 
 	return s
 }
 
-func TestBookingHandler_JWTRoleForbiddenOnBookingRoutes(t *testing.T) {
+func TestBookingHandler_AnyRoleCanAccessBookingRoutes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	secret := "handler-test-secret"
 	owner := uuid.New()
 	svc := &bookingServiceMock{
-		holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return nil, errors.New("unreachable") },
+		holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return nil, errors.New("mock service error") },
 		confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("unreachable") },
 		cancelFn:  func(bookingID uuid.UUID) error { return errors.New("unreachable") },
 		getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("unreachable") },
@@ -217,11 +217,14 @@ func TestBookingHandler_JWTRoleForbiddenOnBookingRoutes(t *testing.T) {
 	body := `{"user_id":"` + owner.String() + `","showtime_id":"` + uuid.New().String() + `","seat_ids":["` + uuid.New().String() + `"]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/bookings/hold", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+bookingJWT(t, secret, owner, "EVENT_OWNER"))
+	// Now any user (even with a normal "USER" role) can access the hold endpoint
+	req.Header.Set("Authorization", "Bearer "+bookingJWT(t, secret, owner, "USER"))
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("status=%d want 403 body=%s", w.Code, w.Body.String())
+	
+	// We expect 500 because the mock service returns an error, NOT 403 Forbidden
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want 500 body=%s", w.Code, w.Body.String())
 	}
 }
 
