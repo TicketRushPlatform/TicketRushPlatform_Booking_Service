@@ -28,6 +28,7 @@ type bookingServiceMock struct {
 	getFn       func(bookingID uuid.UUID) (*dto.BookingResponse, error)
 	getByUserFn func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error)
 	getSeatsFn  func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error)
+	getStatsFn  func() (*dto.DashboardStatsResponse, error)
 	releaseFn   func() (int64, error)
 }
 
@@ -46,6 +47,12 @@ func (m *bookingServiceMock) GetBookingsByUser(userID uuid.UUID, page, pageSize 
 }
 func (m *bookingServiceMock) GetSeatsStatus(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) {
 	return m.getSeatsFn(showtimeID)
+}
+func (m *bookingServiceMock) GetDashboardStats() (*dto.DashboardStatsResponse, error) {
+	if m.getStatsFn != nil {
+		return m.getStatsFn()
+	}
+	return &dto.DashboardStatsResponse{}, nil
 }
 func (m *bookingServiceMock) ReleaseExpiredHolds() (int64, error) { return m.releaseFn() }
 
@@ -722,4 +729,179 @@ func TestBookingHandler_CancelBooking_ForbiddenAndBadShowtimeBroadcastSkipped(t 
 			t.Fatalf("expected broadcast skipped, getSeats calls=%d", getCalls)
 		}
 	})
+}
+
+func TestBookingHandler_GetAdminDashboard(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("success", func(t *testing.T) {
+		svc := &bookingServiceMock{
+			holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+			confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+			cancelFn:  func(bookingID uuid.UUID) error { return errors.New("x") },
+			getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+			getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
+				return nil, 0, errors.New("x")
+			},
+			getSeatsFn: func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) { return nil, errors.New("x") },
+			getStatsFn: func() (*dto.DashboardStatsResponse, error) {
+				return &dto.DashboardStatsResponse{TotalBookings: 5, PaidBookings: 3}, nil
+			},
+			releaseFn: func() (int64, error) { return 0, errors.New("x") },
+		}
+		h := NewBookingHandler(svc, zap.NewNop())
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/admin/dashboard", nil)
+
+		h.GetAdminDashboard(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status=%d want 200 body=%s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("service error", func(t *testing.T) {
+		svc := &bookingServiceMock{
+			holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+			confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+			cancelFn:  func(bookingID uuid.UUID) error { return errors.New("x") },
+			getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+			getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
+				return nil, 0, errors.New("x")
+			},
+			getSeatsFn: func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) { return nil, errors.New("x") },
+			getStatsFn: func() (*dto.DashboardStatsResponse, error) {
+				return nil, apperror.NewInternal("dashboard failed", errors.New("db down"))
+			},
+			releaseFn: func() (int64, error) { return 0, errors.New("x") },
+		}
+		h := NewBookingHandler(svc, zap.NewNop())
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/admin/dashboard", nil)
+
+		h.GetAdminDashboard(c)
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status=%d want 500 body=%s", w.Code, w.Body.String())
+		}
+	})
+}
+
+func TestBookingHandler_StreamSeatsStatus_UpgradeFail(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	showtimeID := uuid.New()
+	h := NewBookingHandler(&bookingServiceMock{
+		holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		cancelFn:  func(bookingID uuid.UUID) error { return errors.New("x") },
+		getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
+			return nil, 0, errors.New("x")
+		},
+		getSeatsFn: func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) {
+			return &dto.SeatsStatusResponse{ShowtimeID: showtimeID.String()}, nil
+		},
+		releaseFn: func() (int64, error) { return 0, errors.New("x") },
+	}, zap.NewNop())
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "showtime_id", Value: showtimeID.String()}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/ws", nil)
+
+	h.StreamSeatsStatus(c)
+}
+
+func TestBookingHandler_StreamSeatsStatus_ReceivesBroadcastUpdate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	showtimeID := uuid.New()
+	h := NewBookingHandler(&bookingServiceMock{
+		holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		cancelFn:  func(bookingID uuid.UUID) error { return errors.New("x") },
+		getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
+			return nil, 0, errors.New("x")
+		},
+		getSeatsFn: func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) {
+			return &dto.SeatsStatusResponse{ShowtimeID: showtimeID.String()}, nil
+		},
+		releaseFn: func() (int64, error) { return 0, errors.New("x") },
+	}, zap.NewNop())
+
+	r := gin.New()
+	r.GET("/showtimes/:showtime_id/seats/ws", h.StreamSeatsStatus)
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/showtimes/" + showtimeID.String() + "/seats/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial ws: %v", err)
+	}
+	defer conn.Close()
+
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("read initial message: %v", err)
+	}
+
+	updatePayload := []byte(`{"type":"seat_status","data":{"showtime_id":"` + showtimeID.String() + `"}}`)
+	h.seatHub.Broadcast(showtimeID, updatePayload)
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("read update message: %v", err)
+	}
+}
+
+func TestBookingHandler_GetBookingsByUser_Unauthorized(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	userID := uuid.New()
+	svc := &bookingServiceMock{
+		holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		cancelFn:  func(bookingID uuid.UUID) error { return errors.New("x") },
+		getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
+			return nil, 0, errors.New("unreachable")
+		},
+		getSeatsFn: func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) { return nil, errors.New("x") },
+		releaseFn:  func() (int64, error) { return 0, errors.New("x") },
+	}
+	h := NewBookingHandler(svc, zap.NewNop())
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "user_id", Value: userID.String()}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/bookings/user/"+userID.String()+"?page=1&page_size=10", nil)
+
+	h.GetBookingsByUser(c)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want 401", w.Code)
+	}
+}
+
+func TestBookingHandler_GetSeatsStatus_ServiceAppError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	showtimeID := uuid.New()
+	svc := &bookingServiceMock{
+		holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		cancelFn:  func(bookingID uuid.UUID) error { return errors.New("x") },
+		getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
+			return nil, 0, errors.New("x")
+		},
+		getSeatsFn: func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) {
+			return nil, apperror.NewNotFound("showtime not found")
+		},
+		releaseFn: func() (int64, error) { return 0, errors.New("x") },
+	}
+	h := NewBookingHandler(svc, zap.NewNop())
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "showtime_id", Value: showtimeID.String()}}
+	c.Request = httptest.NewRequest(http.MethodGet, "/showtimes/"+showtimeID.String()+"/seats", nil)
+
+	h.GetSeatsStatus(c)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status=%d want 404 body=%s", w.Code, w.Body.String())
+	}
 }

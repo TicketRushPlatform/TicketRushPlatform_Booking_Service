@@ -4,6 +4,7 @@ import (
 	"booking_api/internal/dto"
 	"booking_api/internal/models"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -499,6 +500,78 @@ func TestBookingRepository_ErrorPathsWithMock(t *testing.T) {
 		_, err := repo.ReleaseExpiredHolds()
 		if err == nil {
 			t.Fatalf("expected error")
+		}
+	})
+}
+
+func TestBookingRepository_GetDashboardStats(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		repo, mock := setupMockRepo(t)
+		today := time.Now().UTC().Format("2006-01-02")
+
+		mock.ExpectQuery(`SELECT .*status.*COUNT\(\*\).*FROM "bookings".*GROUP BY.*status`).
+			WillReturnRows(sqlmock.NewRows([]string{"status", "count"}).
+				AddRow(string(models.BookingStatusPaid), 3).
+				AddRow(string(models.BookingStatusHolding), 2).
+				AddRow(string(models.BookingStatusCanceled), 1))
+
+		mock.ExpectQuery(`SELECT .*status.*COUNT\(\*\).*FROM "show_time_seats".*GROUP BY.*status`).
+			WillReturnRows(sqlmock.NewRows([]string{"status", "count"}).
+				AddRow(string(models.ShowTimeSeatStatusAvailable), 4).
+				AddRow(string(models.ShowTimeSeatStatusHolding), 2).
+				AddRow(string(models.ShowTimeSeatStatusSold), 3))
+
+		mock.ExpectQuery(`SELECT .*COALESCE\(SUM\(booking_items.price\), 0\).*JOIN bookings.*`).
+			WillReturnRows(sqlmock.NewRows([]string{"total"}).AddRow(450.5))
+
+		mock.ExpectQuery(`SELECT .*TO_CHAR\(DATE\(bookings.created_at AT TIME ZONE 'UTC'\), 'YYYY-MM-DD'\).*`).
+			WillReturnRows(sqlmock.NewRows([]string{"day", "revenue"}).
+				AddRow(today, 125.0))
+
+		stats, err := repo.GetDashboardStats()
+		if err != nil {
+			t.Fatalf("GetDashboardStats() err = %v", err)
+		}
+		if stats.TotalBookings != 6 || stats.PaidBookings != 3 || stats.HoldingBookings != 2 || stats.CanceledBookings != 1 {
+			t.Fatalf("unexpected booking stats: %+v", stats)
+		}
+		if stats.TotalSeats != 9 || stats.AvailableSeats != 4 || stats.HoldingSeats != 2 || stats.SoldSeats != 3 || stats.TicketsSold != 3 {
+			t.Fatalf("unexpected seat stats: %+v", stats)
+		}
+		if stats.TotalRevenue != 450.5 {
+			t.Fatalf("unexpected total revenue: %v", stats.TotalRevenue)
+		}
+		if len(stats.RevenueSeries) != 7 {
+			t.Fatalf("expected 7 revenue points, got %d", len(stats.RevenueSeries))
+		}
+		foundToday := false
+		for _, p := range stats.RevenueSeries {
+			if p.Date == today {
+				foundToday = true
+				if p.Revenue != 125.0 {
+					t.Fatalf("unexpected revenue for today: %v", p.Revenue)
+				}
+			}
+		}
+		if !foundToday {
+			t.Fatalf("today not found in revenue series")
+		}
+	})
+
+	t.Run("status query error", func(t *testing.T) {
+		repo, mock := setupMockRepo(t)
+		mock.ExpectQuery(`SELECT .*status.*COUNT\(\*\).*FROM "bookings".*GROUP BY.*status`).
+			WillReturnError(errors.New("status count failed"))
+
+		stats, err := repo.GetDashboardStats()
+		if err == nil {
+			t.Fatalf("expected error")
+		}
+		if stats != nil {
+			t.Fatalf("expected nil stats")
+		}
+		if !strings.Contains(err.Error(), "failed to count bookings by status") {
+			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 }

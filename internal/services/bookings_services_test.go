@@ -109,6 +109,7 @@ type bookingRepoMock struct {
 	getBookingByIDFn     func(bookingID uuid.UUID) (*models.Booking, error)
 	getBookingsByUserFn  func(userID uuid.UUID, page, pageSize int) ([]models.Booking, int64, error)
 	getSeatsStatusFn     func(showtimeID uuid.UUID) ([]models.ShowTimeSeat, error)
+	getDashboardStatsFn  func() (*dto.DashboardStatsResponse, error)
 	releaseExpiredFn     func() (int64, error)
 	holdSeatsCallCount   int
 	confirmCallCount     int
@@ -116,6 +117,7 @@ type bookingRepoMock struct {
 	getByIDCallCount     int
 	getByUserCallCount   int
 	getSeatsCallCount    int
+	getStatsCallCount    int
 	releaseCallCount     int
 	lastHoldSeatsRequest dto.HoldSeatsRequest
 }
@@ -161,6 +163,16 @@ func (m *bookingRepoMock) GetSeatsStatus(showtimeID uuid.UUID) ([]models.ShowTim
 	m.getSeatsCallCount++
 	m.mu.Unlock()
 	return m.getSeatsStatusFn(showtimeID)
+}
+
+func (m *bookingRepoMock) GetDashboardStats() (*dto.DashboardStatsResponse, error) {
+	m.mu.Lock()
+	m.getStatsCallCount++
+	m.mu.Unlock()
+	if m.getDashboardStatsFn != nil {
+		return m.getDashboardStatsFn()
+	}
+	return &dto.DashboardStatsResponse{}, nil
 }
 
 func (m *bookingRepoMock) ReleaseExpiredHolds() (int64, error) {
@@ -952,4 +964,52 @@ func TestBookingService_OtherMethods(t *testing.T) {
 			tt.run(t, svc, mock)
 		})
 	}
+}
+
+func TestBookingService_GetDashboardStats(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		expected := &dto.DashboardStatsResponse{
+			TotalBookings: 12,
+			PaidBookings:  10,
+			TotalRevenue:  999.5,
+		}
+		mock := &bookingRepoMock{
+			getDashboardStatsFn: func() (*dto.DashboardStatsResponse, error) {
+				return expected, nil
+			},
+		}
+
+		svc := NewBookingService(zap.NewNop(), mock)
+		got, err := svc.GetDashboardStats()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.TotalBookings != expected.TotalBookings || got.PaidBookings != expected.PaidBookings {
+			t.Fatalf("unexpected stats response: %+v", got)
+		}
+		if mock.getStatsCallCount != 1 {
+			t.Fatalf("GetDashboardStats calls = %d, want 1", mock.getStatsCallCount)
+		}
+	})
+
+	t.Run("repository error", func(t *testing.T) {
+		repoErr := errors.New("db down")
+		mock := &bookingRepoMock{
+			getDashboardStatsFn: func() (*dto.DashboardStatsResponse, error) {
+				return nil, repoErr
+			},
+		}
+
+		svc := NewBookingService(zap.NewNop(), mock)
+		got, err := svc.GetDashboardStats()
+		if !errors.Is(err, repoErr) {
+			t.Fatalf("expected %v, got %v", repoErr, err)
+		}
+		if got != nil {
+			t.Fatalf("expected nil stats on error")
+		}
+		if mock.getStatsCallCount != 1 {
+			t.Fatalf("GetDashboardStats calls = %d, want 1", mock.getStatsCallCount)
+		}
+	})
 }
