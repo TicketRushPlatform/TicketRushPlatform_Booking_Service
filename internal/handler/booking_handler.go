@@ -71,7 +71,7 @@ func (h *BookingHandler) StopExpiredHoldReleaser() {
 }
 
 func (h *BookingHandler) RegisterRoutes(rg *gin.RouterGroup) {
-	bookings := rg.Group("/bookings", middleware.RequireAnyRole("BOOKING_OWNER", "ADMIN"))
+	bookings := rg.Group("/bookings")
 	{
 		bookings.POST("/hold", h.HoldSeats)
 		bookings.GET("/:id", h.GetBooking)
@@ -81,10 +81,15 @@ func (h *BookingHandler) RegisterRoutes(rg *gin.RouterGroup) {
 		bookings.POST("/release-expired", middleware.RequireAdmin(), h.ReleaseExpiredHolds)
 	}
 
-	showtimes := rg.Group("/showtimes", middleware.RequireAnyRole("BOOKING_OWNER", "EVENT_OWNER", "ADMIN"))
+	showtimes := rg.Group("/showtimes")
 	{
 		showtimes.GET("/:showtime_id/seats", h.GetSeatsStatus)
 		showtimes.GET("/:showtime_id/seats/ws", h.StreamSeatsStatus)
+	}
+
+	admin := rg.Group("/admin", middleware.RequireAdmin())
+	{
+		admin.GET("/dashboard", h.GetAdminDashboard)
 	}
 }
 
@@ -489,6 +494,29 @@ func (h *BookingHandler) ReleaseExpiredHolds(c *gin.Context) {
 	for _, showtimeID := range h.seatHub.ShowtimeIDs() {
 		h.broadcastSeats(showtimeID)
 	}
+}
+
+// GetAdminDashboard godoc
+// @Summary Get admin dashboard stats
+// @Description Get aggregated booking, seat, and revenue statistics for the admin dashboard.
+// @Tags admin
+// @Produce json
+// @Security BearerAuth
+// @Success 200 {object} dto.SuccessResponse
+// @Failure 401 {object} dto.ErrorResponse
+// @Failure 403 {object} dto.ErrorResponse
+// @Failure 500 {object} dto.ErrorResponse
+// @Router /admin/dashboard [get]
+func (h *BookingHandler) GetAdminDashboard(c *gin.Context) {
+	stats, err := h.service.GetDashboardStats()
+	if err != nil {
+		h.handleError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, dto.SuccessResponse{
+		Data: stats,
+	})
 }
 
 func (h *BookingHandler) broadcastSeats(showtimeID uuid.UUID) {

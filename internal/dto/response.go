@@ -59,3 +59,32 @@ type SuccessResponse struct {
 	Message string      `json:"message"`
 	Data    interface{} `json:"data,omitempty"`
 }
+
+// DashboardRevenuePoint represents revenue aggregated for a single day.
+type DashboardRevenuePoint struct {
+	Date    string  `json:"date"`
+	Revenue float64 `json:"revenue"`
+}
+
+// DashboardStatsResponse is the response payload for the admin dashboard endpoint.
+type DashboardStatsResponse struct {
+	// Booking summary
+	TotalBookings    int64 `json:"total_bookings"`
+	PaidBookings     int64 `json:"paid_bookings"`
+	HoldingBookings  int64 `json:"holding_bookings"`
+	CanceledBookings int64 `json:"canceled_bookings"`
+	ExpiredBookings  int64 `json:"expired_bookings"`
+
+	// Ticket / seat summary
+	TicketsSold    int64 `json:"tickets_sold"`
+	TotalSeats     int64 `json:"total_seats"`
+	AvailableSeats int64 `json:"available_seats"`
+	HoldingSeats   int64 `json:"holding_seats"`
+	SoldSeats      int64 `json:"sold_seats"`
+
+	// Revenue (total from confirmed bookings)
+	TotalRevenue float64 `json:"total_revenue"`
+
+	// Last-7-days daily revenue series (oldest → newest)
+	RevenueSeries []DashboardRevenuePoint `json:"revenue_series"`
+}

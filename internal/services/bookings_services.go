@@ -24,6 +24,7 @@ type BookingService interface {
 	GetBookingsByUser(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error)
 	GetSeatsStatus(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error)
 	ReleaseExpiredHolds() (int64, error)
+	GetDashboardStats() (*dto.DashboardStatsResponse, error)
 }
 
 type SeatLocker interface {
@@ -269,4 +270,11 @@ func (b *bookingService) ReleaseExpiredHolds() (int64, error) {
 
 	b.logger.Info("released expired holds", zap.Int64("count", count))
 	return count, nil
+}
+
+// ---------- GetDashboardStats ----------
+
+func (b *bookingService) GetDashboardStats() (*dto.DashboardStatsResponse, error) {
+	b.logger.Debug("fetching admin dashboard stats")
+	return b.repository.GetDashboardStats()
 }
