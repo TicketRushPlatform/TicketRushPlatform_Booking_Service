@@ -28,6 +28,11 @@ const (
 
 func RequireAuth(cfg AuthConfig) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if strings.HasSuffix(c.Request.URL.Path, "/ws") {
+			c.Next()
+			return
+		}
+
 		rawHeader := strings.TrimSpace(c.GetHeader("Authorization"))
 		if !strings.HasPrefix(rawHeader, "Bearer ") {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
