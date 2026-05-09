@@ -6,6 +6,8 @@ import (
 )
 
 func TestNewConfig(t *testing.T) {
+	t.Setenv("JWT_SECRET", "")
+	t.Setenv("JWT_ALGORITHM", "")
 	_ = os.Setenv("SERVER_HOST", "127.0.0.1")
 	_ = os.Setenv("SERVER_PORT", "8080")
 	_ = os.Setenv("POSTGRES_HOST", "localhost")
@@ -32,5 +34,19 @@ func TestNewConfig(t *testing.T) {
 		cfg.Redis.DB != 2 ||
 		cfg.Redis.TTL.Seconds() != 7 {
 		t.Fatalf("unexpected config: %+v", cfg)
+	}
+
+	if cfg.Auth.JWTSecret != "dev-only-secret" || cfg.Auth.JWTAlgorithm != "HS256" {
+		t.Fatalf("unexpected auth defaults: %+v", cfg.Auth)
+	}
+}
+
+func TestNewConfig_JWTExplicitEnvOverridesDefaults(t *testing.T) {
+	t.Setenv("JWT_SECRET", "prod-secret")
+	t.Setenv("JWT_ALGORITHM", "HS512")
+
+	cfg := NewConfig()
+	if cfg.Auth.JWTSecret != "prod-secret" || cfg.Auth.JWTAlgorithm != "HS512" {
+		t.Fatalf("expected JWT from env, got %+v", cfg.Auth)
 	}
 }

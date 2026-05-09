@@ -53,6 +53,14 @@ func NewClient(cfg Config) *redis.Client {
 	})
 }
 
+// Ping verifies that the Redis server accepts connections (e.g. after TCP dial).
+func Ping(ctx context.Context, client *redis.Client) error {
+	if client == nil {
+		return fmt.Errorf("redis client is nil")
+	}
+	return client.Ping(ctx).Err()
+}
+
 func NewSeatLocker(client *redis.Client, ttl time.Duration) *SeatLocker {
 	if ttl <= 0 {
 		ttl = 5 * time.Second
