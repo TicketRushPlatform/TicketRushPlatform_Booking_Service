@@ -80,6 +80,10 @@ type SeatPricing struct {
 	Seat     Seat     `gorm:"foreignKey:SeatID;references:ID"`
 }
 
+func (SeatPricing) TableName() string {
+	return "seat_pricing"
+}
+
 func (b *Booking) ToDTO() *dto.BookingResponse {
 	totalAmount := decimal.NewFromInt(0)
 
@@ -98,6 +102,7 @@ func (b *Booking) ToDTO() *dto.BookingResponse {
 
 	return &dto.BookingResponse{
 		ID:          b.ID.String(),
+		UserID:      b.UserID.String(),
 		ShowTimeID:  b.ShowTimeID.String(),
 		Status:      string(b.Status),
 		ExpiresAt:   b.ExpiresAt,

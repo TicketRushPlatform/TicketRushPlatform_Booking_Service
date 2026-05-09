@@ -3,42 +3,88 @@ package handler
 import (
 	"booking_api/internal/apperror"
 	"booking_api/internal/dto"
+	"booking_api/internal/middleware"
+	"booking_api/internal/realtime"
 	"booking_api/internal/services"
+	"encoding/json"
 	"errors"
 	"math"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 )
 
 type BookingHandler struct {
 	service services.BookingService
 	logger  *zap.Logger
+	seatHub *realtime.SeatHub
+
+	releaserStop chan struct{}
+	releaserOnce sync.Once
 }
 
 func NewBookingHandler(service services.BookingService, logger *zap.Logger) *BookingHandler {
 	return &BookingHandler{
 		service: service,
 		logger:  logger,
+		seatHub: realtime.NewSeatHub(),
+
+		releaserStop: make(chan struct{}),
 	}
 }
 
+func (h *BookingHandler) StartExpiredHoldReleaser(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				count, err := h.service.ReleaseExpiredHolds()
+				if err != nil {
+					h.logger.Warn("failed to auto-release expired holds", zap.Error(err))
+					continue
+				}
+				if count == 0 {
+					continue
+				}
+				for _, showtimeID := range h.seatHub.ShowtimeIDs() {
+					h.broadcastSeats(showtimeID)
+				}
+			case <-h.releaserStop:
+				return
+			}
+		}
+	}()
+}
+
+func (h *BookingHandler) StopExpiredHoldReleaser() {
+	h.releaserOnce.Do(func() {
+		close(h.releaserStop)
+	})
+}
+
 func (h *BookingHandler) RegisterRoutes(rg *gin.RouterGroup) {
-	bookings := rg.Group("/bookings")
+	bookings := rg.Group("/bookings", middleware.RequireAnyRole("BOOKING_OWNER", "ADMIN"))
 	{
 		bookings.POST("/hold", h.HoldSeats)
 		bookings.GET("/:id", h.GetBooking)
 		bookings.POST("/:id/confirm", h.ConfirmBooking)
 		bookings.POST("/:id/cancel", h.CancelBooking)
 		bookings.GET("/user/:user_id", h.GetBookingsByUser)
-		bookings.POST("/release-expired", h.ReleaseExpiredHolds)
+		bookings.POST("/release-expired", middleware.RequireAdmin(), h.ReleaseExpiredHolds)
 	}
 
-	showtimes := rg.Group("/showtimes")
+	showtimes := rg.Group("/showtimes", middleware.RequireAnyRole("BOOKING_OWNER", "EVENT_OWNER", "ADMIN"))
 	{
 		showtimes.GET("/:showtime_id/seats", h.GetSeatsStatus)
+		showtimes.GET("/:showtime_id/seats/ws", h.StreamSeatsStatus)
 	}
 }
 
@@ -63,6 +109,15 @@ func (h *BookingHandler) HoldSeats(c *gin.Context) {
 		})
 		return
 	}
+	authUserID, ok := middleware.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, dto.ErrorResponse{
+			Code:    http.StatusUnauthorized,
+			Message: "authenticated user was not found in request context",
+		})
+		return
+	}
+	req.UserID = authUserID
 
 	booking, err := h.service.HoldSeats(req)
 	if err != nil {
@@ -74,6 +129,7 @@ func (h *BookingHandler) HoldSeats(c *gin.Context) {
 		Message: "seats held successfully",
 		Data:    booking,
 	})
+	h.broadcastSeats(req.ShowtimeID)
 }
 
 // ConfirmBooking godoc
@@ -99,6 +155,28 @@ func (h *BookingHandler) ConfirmBooking(c *gin.Context) {
 		return
 	}
 
+	authUserID, isAuthed := middleware.GetUserID(c)
+	if !isAuthed {
+		c.JSON(http.StatusUnauthorized, dto.ErrorResponse{
+			Code:    http.StatusUnauthorized,
+			Message: "authenticated user was not found in request context",
+		})
+		return
+	}
+
+	current, err := h.service.GetBooking(bookingID)
+	if err != nil {
+		h.handleError(c, err)
+		return
+	}
+	if current.UserID != authUserID.String() && middleware.GetRole(c) != "ADMIN" {
+		c.JSON(http.StatusForbidden, dto.ErrorResponse{
+			Code:    http.StatusForbidden,
+			Message: "you do not have permission to access this booking",
+		})
+		return
+	}
+
 	booking, err := h.service.ConfirmBooking(bookingID)
 	if err != nil {
 		h.handleError(c, err)
@@ -109,6 +187,10 @@ func (h *BookingHandler) ConfirmBooking(c *gin.Context) {
 		Message: "booking confirmed successfully",
 		Data:    booking,
 	})
+
+	if showtimeID, parseErr := uuid.Parse(booking.ShowTimeID); parseErr == nil {
+		h.broadcastSeats(showtimeID)
+	}
 }
 
 // CancelBooking godoc
@@ -134,6 +216,28 @@ func (h *BookingHandler) CancelBooking(c *gin.Context) {
 		return
 	}
 
+	authUserID, isAuthed := middleware.GetUserID(c)
+	if !isAuthed {
+		c.JSON(http.StatusUnauthorized, dto.ErrorResponse{
+			Code:    http.StatusUnauthorized,
+			Message: "authenticated user was not found in request context",
+		})
+		return
+	}
+
+	booking, err := h.service.GetBooking(bookingID)
+	if err != nil {
+		h.handleError(c, err)
+		return
+	}
+	if booking.UserID != authUserID.String() && middleware.GetRole(c) != "ADMIN" {
+		c.JSON(http.StatusForbidden, dto.ErrorResponse{
+			Code:    http.StatusForbidden,
+			Message: "you do not have permission to access this booking",
+		})
+		return
+	}
+
 	if err := h.service.CancelBooking(bookingID); err != nil {
 		h.handleError(c, err)
 		return
@@ -142,6 +246,10 @@ func (h *BookingHandler) CancelBooking(c *gin.Context) {
 	c.JSON(http.StatusOK, dto.SuccessResponse{
 		Message: "booking canceled successfully",
 	})
+
+	if showtimeID, parseErr := uuid.Parse(booking.ShowTimeID); parseErr == nil {
+		h.broadcastSeats(showtimeID)
+	}
 }
 
 // GetBooking godoc
@@ -165,9 +273,25 @@ func (h *BookingHandler) GetBooking(c *gin.Context) {
 		return
 	}
 
+	authUserID, isAuthed := middleware.GetUserID(c)
+	if !isAuthed {
+		c.JSON(http.StatusUnauthorized, dto.ErrorResponse{
+			Code:    http.StatusUnauthorized,
+			Message: "authenticated user was not found in request context",
+		})
+		return
+	}
+
 	booking, err := h.service.GetBooking(bookingID)
 	if err != nil {
 		h.handleError(c, err)
+		return
+	}
+	if booking.UserID != authUserID.String() && middleware.GetRole(c) != "ADMIN" {
+		c.JSON(http.StatusForbidden, dto.ErrorResponse{
+			Code:    http.StatusForbidden,
+			Message: "you do not have permission to access this booking",
+		})
 		return
 	}
 
@@ -194,6 +318,21 @@ func (h *BookingHandler) GetBookingsByUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, dto.ErrorResponse{
 			Code:    http.StatusBadRequest,
 			Message: "invalid user ID",
+		})
+		return
+	}
+	authUserID, isAuthed := middleware.GetUserID(c)
+	if !isAuthed {
+		c.JSON(http.StatusUnauthorized, dto.ErrorResponse{
+			Code:    http.StatusUnauthorized,
+			Message: "authenticated user was not found in request context",
+		})
+		return
+	}
+	if userID != authUserID && middleware.GetRole(c) != "ADMIN" {
+		c.JSON(http.StatusForbidden, dto.ErrorResponse{
+			Code:    http.StatusForbidden,
+			Message: "you do not have permission to access this user's bookings",
 		})
 		return
 	}
@@ -255,6 +394,77 @@ func (h *BookingHandler) GetSeatsStatus(c *gin.Context) {
 	})
 }
 
+var seatStatusUpgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+// StreamSeatsStatus godoc
+// @Summary Stream seats status
+// @Description Stream realtime seat status updates for a showtime over WebSocket.
+// @Tags showtimes
+// @Param showtime_id path string true "Showtime ID"
+// @Router /showtimes/{showtime_id}/seats/ws [get]
+func (h *BookingHandler) StreamSeatsStatus(c *gin.Context) {
+	showtimeID, err := uuid.Parse(c.Param("showtime_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{
+			Code:    http.StatusBadRequest,
+			Message: "invalid showtime ID",
+		})
+		return
+	}
+
+	conn, err := seatStatusUpgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		h.logger.Warn("failed to upgrade seat websocket", zap.Error(err))
+		return
+	}
+	defer conn.Close()
+
+	updates := h.seatHub.Subscribe(showtimeID)
+	defer h.seatHub.Unsubscribe(showtimeID, updates)
+
+	if payload, err := h.buildSeatsPayload(showtimeID); err == nil {
+		if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+			return
+		}
+	} else {
+		h.logger.Warn("failed to build initial seat websocket payload", zap.Error(err))
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	pingTicker := time.NewTicker(25 * time.Second)
+	defer pingTicker.Stop()
+
+	for {
+		select {
+		case <-done:
+			return
+		case payload := <-updates:
+			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+				return
+			}
+		case <-pingTicker.C:
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
 // ReleaseExpiredHolds godoc
 // @Summary Release expired holds
 // @Description Release all expired holding bookings and seats.
@@ -274,6 +484,31 @@ func (h *BookingHandler) ReleaseExpiredHolds(c *gin.Context) {
 	c.JSON(http.StatusOK, dto.SuccessResponse{
 		Message: "expired holds released",
 		Data:    map[string]int64{"released_count": count},
+	})
+
+	for _, showtimeID := range h.seatHub.ShowtimeIDs() {
+		h.broadcastSeats(showtimeID)
+	}
+}
+
+func (h *BookingHandler) broadcastSeats(showtimeID uuid.UUID) {
+	payload, err := h.buildSeatsPayload(showtimeID)
+	if err != nil {
+		h.logger.Warn("failed to build seat status broadcast", zap.Error(err), zap.String("showtime_id", showtimeID.String()))
+		return
+	}
+	h.seatHub.Broadcast(showtimeID, payload)
+}
+
+func (h *BookingHandler) buildSeatsPayload(showtimeID uuid.UUID) ([]byte, error) {
+	status, err := h.service.GetSeatsStatus(showtimeID)
+	if err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(gin.H{
+		"type": "seat_status",
+		"data": status,
 	})
 }
 

@@ -1,12 +1,15 @@
 package services
 
 import (
+	"booking_api/internal/apperror"
 	"booking_api/internal/dto"
 	"booking_api/internal/models"
 	"booking_api/internal/repository"
+	"context"
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -23,22 +26,38 @@ type BookingService interface {
 	ReleaseExpiredHolds() (int64, error)
 }
 
+type SeatLocker interface {
+	LockSeats(ctx context.Context, showtimeID uuid.UUID, seatIDs []uuid.UUID, owner string) (bool, error)
+	UnlockSeats(ctx context.Context, showtimeID uuid.UUID, seatIDs []uuid.UUID, owner string) error
+}
+
 type bookingService struct {
 	logger     *zap.Logger
 	repository repository.BookingRepository
+	seatLocker SeatLocker
 }
 
 func NewBookingService(
 	logger *zap.Logger,
 	repository repository.BookingRepository,
 ) BookingService {
+	return NewBookingServiceWithSeatLocker(logger, repository, nil)
+}
+
+func NewBookingServiceWithSeatLocker(
+	logger *zap.Logger,
+	repository repository.BookingRepository,
+	seatLocker SeatLocker,
+) BookingService {
 	return &bookingService{
 		logger:     logger,
 		repository: repository,
+		seatLocker: seatLocker,
 	}
 }
 
 const maxDeadlockRetries = 3
+const seatLockTimeout = 2 * time.Second
 
 func isDeadlock(err error) bool {
 	var pgErr *pgconn.PgError
@@ -61,6 +80,31 @@ func (b *bookingService) HoldSeats(req dto.HoldSeatsRequest) (*dto.BookingRespon
 	req.SeatIDs = sortedSeats
 
 	b.logger.Debug("sorted seats", zap.Any("sorted_seats", sortedSeats))
+
+	var lockOwner string
+	if b.seatLocker != nil {
+		lockOwner = uuid.NewString()
+
+		ctx, cancel := context.WithTimeout(context.Background(), seatLockTimeout)
+		locked, lockErr := b.seatLocker.LockSeats(ctx, req.ShowtimeID, req.SeatIDs, lockOwner)
+		cancel()
+		if lockErr != nil {
+			b.logger.Error("failed to acquire redis seat lock", zap.Error(lockErr))
+			return nil, fmt.Errorf("failed to acquire seat lock: %w", lockErr)
+		}
+		if !locked {
+			b.logger.Info("seat lock conflict", zap.String("showtime_id", req.ShowtimeID.String()), zap.Any("seat_ids", req.SeatIDs))
+			return nil, apperror.NewConflict("some seats are being held by another buyer")
+		}
+
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), seatLockTimeout)
+			defer cancel()
+			if err := b.seatLocker.UnlockSeats(ctx, req.ShowtimeID, req.SeatIDs, lockOwner); err != nil {
+				b.logger.Warn("failed to release redis seat lock", zap.Error(err))
+			}
+		}()
+	}
 
 	var booking *models.Booking
 	var err error
