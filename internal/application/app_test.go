@@ -4,12 +4,14 @@ import (
 	"booking_api/internal/config"
 	"booking_api/internal/infrastructure/database"
 	"booking_api/internal/infrastructure/logger"
+	"booking_api/internal/infrastructure/redislock"
 	"booking_api/internal/server"
 	"context"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"go.uber.org/zap"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -114,5 +116,46 @@ func TestNewAppConnectError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected db init error")
+	}
+}
+
+func TestNewApp_WithRedisSeatLockerShutdownCleanup(t *testing.T) {
+	origLogger := newLoggerFn
+	origHTTP := newHTTPServerFn
+	origConnect := connectPostgresFn
+	t.Cleanup(func() {
+		newLoggerFn = origLogger
+		newHTTPServerFn = origHTTP
+		connectPostgresFn = origConnect
+	})
+
+	newLoggerFn = func(cfg logger.Config) (*zap.Logger, error) { return zap.NewNop(), nil }
+	newHTTPServerFn = func(cfg server.ServerConfig) *server.HTTPServer {
+		return server.NewHTTPServer(server.ServerConfig{Host: "bad host", Port: 8080})
+	}
+	connectPostgresFn = func(cfg database.PostgresConfig) (*gorm.DB, error) {
+		return gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	}
+
+	mr := miniredis.RunT(t)
+
+	app, err := NewApp(config.Config{
+		Logger: logger.Config{Level: "info"},
+		Server: server.ServerConfig{Host: "127.0.0.1", Port: 0},
+		Postgres: database.PostgresConfig{
+			Host: "dummy",
+		},
+		Redis: redislock.Config{
+			Addr: mr.Addr(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewApp: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := app.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
 }

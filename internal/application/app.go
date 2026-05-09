@@ -55,7 +55,20 @@ func NewApp(cfg config.Config) (*App, error) {
 	var seatLocker *redislock.SeatLocker
 	if cfg.Redis.Addr != "" {
 		redisClient := redislock.NewClient(cfg.Redis)
+		pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := redislock.Ping(pingCtx, redisClient)
+		cancel()
+		if err != nil {
+			_ = redisClient.Close()
+			return nil, fmt.Errorf("redis ping failed (addr=%s db=%d): %w", cfg.Redis.Addr, cfg.Redis.DB, err)
+		}
+		zapLogger.Info("redis connection verified",
+			zap.String("addr", cfg.Redis.Addr),
+			zap.Int("db", cfg.Redis.DB),
+		)
 		seatLocker = redislock.NewSeatLocker(redisClient, cfg.Redis.TTL)
+	} else {
+		zapLogger.Info("redis disabled for seat locking (REDIS_ADDR empty); holds use database only")
 	}
 
 	bookingRepo := repository.NewBookingRepository(db, zapLogger)

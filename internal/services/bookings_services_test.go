@@ -404,6 +404,22 @@ func TestBookingService_HoldSeatsWithSeatLocker(t *testing.T) {
 			wantLockCalls:   1,
 			wantUnlockCalls: 1,
 		},
+		{
+			name: "unlock failure after success still returns booking",
+			repo: &bookingRepoMock{
+				holdSeatsFn: func(req dto.HoldSeatsRequest) (*models.Booking, error) {
+					return buildBooking(), nil
+				},
+			},
+			locker: &seatLockerMock{
+				unlockFn: func(ctx context.Context, showtimeID uuid.UUID, seatIDs []uuid.UUID, owner string) error {
+					return errors.New("redis unlock failed")
+				},
+			},
+			wantRepoCalls:   1,
+			wantLockCalls:   1,
+			wantUnlockCalls: 1,
+		},
 	}
 
 	for _, tt := range tests {

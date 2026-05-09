@@ -10,6 +10,55 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestPing_NilClient(t *testing.T) {
+	err := Ping(context.Background(), nil)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestPing_OK(t *testing.T) {
+	srv := miniredis.RunT(t)
+	c := NewClient(Config{Addr: srv.Addr()})
+	defer func() { _ = c.Close() }()
+	if err := Ping(context.Background(), c); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+}
+
+func TestNewSeatLocker_DefaultTTL(t *testing.T) {
+	srv := miniredis.RunT(t)
+	c := NewClient(Config{Addr: srv.Addr()})
+	locker := NewSeatLocker(c, 0)
+	ctx := context.Background()
+	showtimeID := uuid.New()
+	seatID := uuid.New()
+	locked, err := locker.LockSeats(ctx, showtimeID, []uuid.UUID{seatID}, "o")
+	if err != nil {
+		t.Fatalf("LockSeats: %v", err)
+	}
+	if !locked {
+		t.Fatalf("expected lock ok")
+	}
+	if err := locker.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestSeatLocker_LockSeatsRedisUnavailable(t *testing.T) {
+	srv := miniredis.RunT(t)
+	addr := srv.Addr()
+	c := NewClient(Config{Addr: addr})
+	locker := NewSeatLocker(c, time.Second)
+	srv.Close()
+
+	_, err := locker.LockSeats(context.Background(), uuid.New(), []uuid.UUID{uuid.New()}, "x")
+	if err == nil {
+		t.Fatalf("expected redis error")
+	}
+	_ = locker.Close()
+}
+
 func TestSeatLocker_LockSeatsAtomicConflictAndRelease(t *testing.T) {
 	server := miniredis.RunT(t)
 	client := NewClient(Config{Addr: server.Addr()})
