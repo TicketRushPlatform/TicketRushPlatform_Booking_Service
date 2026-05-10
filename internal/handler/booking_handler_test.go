@@ -4,6 +4,8 @@ import (
 	"booking_api/internal/apperror"
 	"booking_api/internal/dto"
 	"booking_api/internal/middleware"
+	"booking_api/internal/services"
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -903,5 +905,513 @@ func TestBookingHandler_GetSeatsStatus_ServiceAppError(t *testing.T) {
 	h.GetSeatsStatus(c)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status=%d want 404 body=%s", w.Code, w.Body.String())
+	}
+}
+
+// ---------- virtualQueueServiceMock ----------
+
+type virtualQueueServiceMock struct {
+	joinFn                    func(ctx context.Context, showtimeID, userID uuid.UUID) (*dto.QueueStatusResponse, error)
+	heartbeatFn               func(ctx context.Context, showtimeID, userID uuid.UUID) (*dto.QueueStatusResponse, error)
+	leaveFn                   func(ctx context.Context, showtimeID, userID uuid.UUID) error
+	statusFn                  func(ctx context.Context, showtimeID, userID uuid.UUID) (*dto.QueueStatusResponse, error)
+	requireActiveBookingRoomFn func(ctx context.Context, showtimeID, userID uuid.UUID) error
+}
+
+func (m *virtualQueueServiceMock) Join(ctx context.Context, showtimeID, userID uuid.UUID) (*dto.QueueStatusResponse, error) {
+	return m.joinFn(ctx, showtimeID, userID)
+}
+func (m *virtualQueueServiceMock) Heartbeat(ctx context.Context, showtimeID, userID uuid.UUID) (*dto.QueueStatusResponse, error) {
+	return m.heartbeatFn(ctx, showtimeID, userID)
+}
+func (m *virtualQueueServiceMock) Leave(ctx context.Context, showtimeID, userID uuid.UUID) error {
+	return m.leaveFn(ctx, showtimeID, userID)
+}
+func (m *virtualQueueServiceMock) Status(ctx context.Context, showtimeID, userID uuid.UUID) (*dto.QueueStatusResponse, error) {
+	return m.statusFn(ctx, showtimeID, userID)
+}
+func (m *virtualQueueServiceMock) RequireActiveBookingRoom(ctx context.Context, showtimeID, userID uuid.UUID) error {
+	return m.requireActiveBookingRoomFn(ctx, showtimeID, userID)
+}
+
+// ---------- SetQueueService ----------
+
+func TestBookingHandler_SetQueueService(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewBookingHandler(&bookingServiceMock{
+		holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		cancelFn:  func(bookingID uuid.UUID) error { return errors.New("x") },
+		getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
+			return nil, 0, errors.New("x")
+		},
+		getSeatsFn: func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) { return nil, errors.New("x") },
+		releaseFn:  func() (int64, error) { return 0, errors.New("x") },
+	}, zap.NewNop())
+
+	if h.queueService != nil {
+		t.Fatalf("expected nil queueService initially")
+	}
+
+	qsMock := &virtualQueueServiceMock{}
+	h.SetQueueService(qsMock)
+	if h.queueService == nil {
+		t.Fatalf("expected non-nil queueService after set")
+	}
+}
+
+// ---------- parseQueueAuth ----------
+
+func TestBookingHandler_ParseQueueAuth_InvalidShowtimeID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewBookingHandler(&bookingServiceMock{
+		holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		cancelFn:  func(bookingID uuid.UUID) error { return errors.New("x") },
+		getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
+			return nil, 0, errors.New("x")
+		},
+		getSeatsFn: func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) { return nil, errors.New("x") },
+		releaseFn:  func() (int64, error) { return 0, errors.New("x") },
+	}, zap.NewNop())
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "showtime_id", Value: "bad"}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+
+	_, _, ok := h.parseQueueAuth(c)
+	if ok {
+		t.Fatalf("expected false for invalid showtime")
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", w.Code)
+	}
+}
+
+func TestBookingHandler_ParseQueueAuth_Unauthorized(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewBookingHandler(&bookingServiceMock{
+		holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		cancelFn:  func(bookingID uuid.UUID) error { return errors.New("x") },
+		getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
+			return nil, 0, errors.New("x")
+		},
+		getSeatsFn: func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) { return nil, errors.New("x") },
+		releaseFn:  func() (int64, error) { return 0, errors.New("x") },
+	}, zap.NewNop())
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "showtime_id", Value: uuid.New().String()}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+	// No auth user set
+
+	_, _, ok := h.parseQueueAuth(c)
+	if ok {
+		t.Fatalf("expected false for missing auth")
+	}
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want 401", w.Code)
+	}
+}
+
+func TestBookingHandler_ParseQueueAuth_Success(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewBookingHandler(&bookingServiceMock{
+		holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		cancelFn:  func(bookingID uuid.UUID) error { return errors.New("x") },
+		getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
+			return nil, 0, errors.New("x")
+		},
+		getSeatsFn: func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) { return nil, errors.New("x") },
+		releaseFn:  func() (int64, error) { return 0, errors.New("x") },
+	}, zap.NewNop())
+
+	expectedShowtime := uuid.New()
+	expectedUser := uuid.New()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "showtime_id", Value: expectedShowtime.String()}}
+	c.Set(testAuthUserKey, expectedUser)
+	c.Set(testAuthRoleKey, "USER")
+	c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+
+	sid, uid, ok := h.parseQueueAuth(c)
+	if !ok {
+		t.Fatalf("expected success")
+	}
+	if sid != expectedShowtime || uid != expectedUser {
+		t.Fatalf("unexpected ids: showtime=%s user=%s", sid, uid)
+	}
+}
+
+// ---------- Queue handlers: nil queueService → 503 ----------
+
+func newMinimalSvc() *bookingServiceMock {
+	return &bookingServiceMock{
+		holdFn:    func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		cancelFn:  func(bookingID uuid.UUID) error { return errors.New("x") },
+		getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
+			return nil, 0, errors.New("x")
+		},
+		getSeatsFn: func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) { return nil, errors.New("x") },
+		releaseFn:  func() (int64, error) { return 0, errors.New("x") },
+	}
+}
+
+func TestBookingHandler_QueueHandlers_NilService(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	showtimeID := uuid.New()
+	userID := uuid.New()
+
+	type handlerFunc func(*BookingHandler) func(*gin.Context)
+
+	handlers := []struct {
+		name string
+		fn   handlerFunc
+	}{
+		{"JoinQueue", func(h *BookingHandler) func(*gin.Context) { return h.JoinQueue }},
+		{"HeartbeatQueue", func(h *BookingHandler) func(*gin.Context) { return h.HeartbeatQueue }},
+		{"LeaveQueue", func(h *BookingHandler) func(*gin.Context) { return h.LeaveQueue }},
+		{"GetQueueStatus", func(h *BookingHandler) func(*gin.Context) { return h.GetQueueStatus }},
+	}
+
+	for _, tt := range handlers {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewBookingHandler(newMinimalSvc(), zap.NewNop())
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Params = gin.Params{{Key: "showtime_id", Value: showtimeID.String()}}
+			c.Set(testAuthUserKey, userID)
+			c.Set(testAuthRoleKey, "USER")
+			c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+
+			tt.fn(h)(c)
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status=%d want 503", w.Code)
+			}
+		})
+	}
+}
+
+// ---------- JoinQueue ----------
+
+func TestBookingHandler_JoinQueue_Success(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	showtimeID := uuid.New()
+	userID := uuid.New()
+
+	qsMock := &virtualQueueServiceMock{
+		joinFn: func(ctx context.Context, sid, uid uuid.UUID) (*dto.QueueStatusResponse, error) {
+			return &dto.QueueStatusResponse{ShowtimeID: sid.String(), UserID: uid.String(), CanEnter: true}, nil
+		},
+	}
+	h := NewBookingHandler(newMinimalSvc(), zap.NewNop())
+	h.SetQueueService(qsMock)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "showtime_id", Value: showtimeID.String()}}
+	c.Set(testAuthUserKey, userID)
+	c.Set(testAuthRoleKey, "USER")
+	c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+
+	h.JoinQueue(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200 body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestBookingHandler_JoinQueue_Error(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	showtimeID := uuid.New()
+	userID := uuid.New()
+
+	qsMock := &virtualQueueServiceMock{
+		joinFn: func(ctx context.Context, sid, uid uuid.UUID) (*dto.QueueStatusResponse, error) {
+			return nil, apperror.NewConflict("already in queue")
+		},
+	}
+	h := NewBookingHandler(newMinimalSvc(), zap.NewNop())
+	h.SetQueueService(qsMock)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "showtime_id", Value: showtimeID.String()}}
+	c.Set(testAuthUserKey, userID)
+	c.Set(testAuthRoleKey, "USER")
+	c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+
+	h.JoinQueue(c)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status=%d want 409", w.Code)
+	}
+}
+
+// ---------- HeartbeatQueue ----------
+
+func TestBookingHandler_HeartbeatQueue_Success(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	showtimeID := uuid.New()
+	userID := uuid.New()
+
+	qsMock := &virtualQueueServiceMock{
+		heartbeatFn: func(ctx context.Context, sid, uid uuid.UUID) (*dto.QueueStatusResponse, error) {
+			return &dto.QueueStatusResponse{ShowtimeID: sid.String(), CanEnter: true}, nil
+		},
+	}
+	h := NewBookingHandler(newMinimalSvc(), zap.NewNop())
+	h.SetQueueService(qsMock)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "showtime_id", Value: showtimeID.String()}}
+	c.Set(testAuthUserKey, userID)
+	c.Set(testAuthRoleKey, "USER")
+	c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+
+	h.HeartbeatQueue(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", w.Code)
+	}
+}
+
+func TestBookingHandler_HeartbeatQueue_Error(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	showtimeID := uuid.New()
+	userID := uuid.New()
+
+	qsMock := &virtualQueueServiceMock{
+		heartbeatFn: func(ctx context.Context, sid, uid uuid.UUID) (*dto.QueueStatusResponse, error) {
+			return nil, errors.New("redis down")
+		},
+	}
+	h := NewBookingHandler(newMinimalSvc(), zap.NewNop())
+	h.SetQueueService(qsMock)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "showtime_id", Value: showtimeID.String()}}
+	c.Set(testAuthUserKey, userID)
+	c.Set(testAuthRoleKey, "USER")
+	c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+
+	h.HeartbeatQueue(c)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want 500", w.Code)
+	}
+}
+
+// ---------- LeaveQueue ----------
+
+func TestBookingHandler_LeaveQueue_Success(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	showtimeID := uuid.New()
+	userID := uuid.New()
+
+	qsMock := &virtualQueueServiceMock{
+		leaveFn: func(ctx context.Context, sid, uid uuid.UUID) error {
+			return nil
+		},
+	}
+	h := NewBookingHandler(newMinimalSvc(), zap.NewNop())
+	h.SetQueueService(qsMock)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "showtime_id", Value: showtimeID.String()}}
+	c.Set(testAuthUserKey, userID)
+	c.Set(testAuthRoleKey, "USER")
+	c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+
+	h.LeaveQueue(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", w.Code)
+	}
+}
+
+func TestBookingHandler_LeaveQueue_Error(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	showtimeID := uuid.New()
+	userID := uuid.New()
+
+	qsMock := &virtualQueueServiceMock{
+		leaveFn: func(ctx context.Context, sid, uid uuid.UUID) error {
+			return apperror.NewInternal("leave failed", errors.New("redis"))
+		},
+	}
+	h := NewBookingHandler(newMinimalSvc(), zap.NewNop())
+	h.SetQueueService(qsMock)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "showtime_id", Value: showtimeID.String()}}
+	c.Set(testAuthUserKey, userID)
+	c.Set(testAuthRoleKey, "USER")
+	c.Request = httptest.NewRequest(http.MethodPost, "/x", nil)
+
+	h.LeaveQueue(c)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d want 500", w.Code)
+	}
+}
+
+// ---------- GetQueueStatus ----------
+
+func TestBookingHandler_GetQueueStatus_Success(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	showtimeID := uuid.New()
+	userID := uuid.New()
+
+	qsMock := &virtualQueueServiceMock{
+		statusFn: func(ctx context.Context, sid, uid uuid.UUID) (*dto.QueueStatusResponse, error) {
+			return &dto.QueueStatusResponse{ShowtimeID: sid.String(), Position: 3}, nil
+		},
+	}
+	h := NewBookingHandler(newMinimalSvc(), zap.NewNop())
+	h.SetQueueService(qsMock)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "showtime_id", Value: showtimeID.String()}}
+	c.Set(testAuthUserKey, userID)
+	c.Set(testAuthRoleKey, "USER")
+	c.Request = httptest.NewRequest(http.MethodGet, "/x", nil)
+
+	h.GetQueueStatus(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", w.Code)
+	}
+}
+
+func TestBookingHandler_GetQueueStatus_Error(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	showtimeID := uuid.New()
+	userID := uuid.New()
+
+	qsMock := &virtualQueueServiceMock{
+		statusFn: func(ctx context.Context, sid, uid uuid.UUID) (*dto.QueueStatusResponse, error) {
+			return nil, apperror.NewConflict(services.QueueKickMessage)
+		},
+	}
+	h := NewBookingHandler(newMinimalSvc(), zap.NewNop())
+	h.SetQueueService(qsMock)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Params = gin.Params{{Key: "showtime_id", Value: showtimeID.String()}}
+	c.Set(testAuthUserKey, userID)
+	c.Set(testAuthRoleKey, "USER")
+	c.Request = httptest.NewRequest(http.MethodGet, "/x", nil)
+
+	h.GetQueueStatus(c)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status=%d want 409", w.Code)
+	}
+}
+
+// ---------- HoldSeats with queueService ----------
+
+func TestBookingHandler_HoldSeats_QueueServiceForbidden(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authUserID := uuid.New()
+	showtimeID := uuid.New()
+
+	svc := &bookingServiceMock{
+		holdFn: func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) {
+			t.Fatalf("service should not be called when queue check fails")
+			return nil, nil
+		},
+		confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		cancelFn:  func(bookingID uuid.UUID) error { return errors.New("x") },
+		getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
+			return nil, 0, errors.New("x")
+		},
+		getSeatsFn: func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) { return nil, errors.New("x") },
+		releaseFn:  func() (int64, error) { return 0, errors.New("x") },
+	}
+
+	qsMock := &virtualQueueServiceMock{
+		requireActiveBookingRoomFn: func(ctx context.Context, sid, uid uuid.UUID) error {
+			return apperror.NewForbidden("waiting room required")
+		},
+	}
+
+	h := NewBookingHandler(svc, zap.NewNop())
+	h.SetQueueService(qsMock)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	body := `{"user_id":"` + authUserID.String() + `","showtime_id":"` + showtimeID.String() + `","seat_ids":["` + uuid.New().String() + `"]}`
+	req := httptest.NewRequest(http.MethodPost, "/hold", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+	c.Set(testAuthUserKey, authUserID)
+	c.Set(testAuthRoleKey, "USER")
+
+	h.HoldSeats(c)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status=%d want 403 body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestBookingHandler_HoldSeats_QueueServiceAllowed(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authUserID := uuid.New()
+	showtimeID := uuid.New()
+
+	svc := &bookingServiceMock{
+		holdFn: func(req dto.HoldSeatsRequest) (*dto.BookingResponse, error) {
+			return &dto.BookingResponse{
+				ID:         uuid.New().String(),
+				UserID:     req.UserID.String(),
+				ShowTimeID: req.ShowtimeID.String(),
+				Status:     "HOLDING",
+				CreatedAt:  time.Now(),
+			}, nil
+		},
+		confirmFn: func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		cancelFn:  func(bookingID uuid.UUID) error { return errors.New("x") },
+		getFn:     func(bookingID uuid.UUID) (*dto.BookingResponse, error) { return nil, errors.New("x") },
+		getByUserFn: func(userID uuid.UUID, page, pageSize int) ([]dto.BookingResponse, int64, error) {
+			return nil, 0, errors.New("x")
+		},
+		getSeatsFn: func(showtimeID uuid.UUID) (*dto.SeatsStatusResponse, error) {
+			return &dto.SeatsStatusResponse{ShowtimeID: showtimeID.String()}, nil
+		},
+		releaseFn: func() (int64, error) { return 0, errors.New("x") },
+	}
+
+	qsMock := &virtualQueueServiceMock{
+		requireActiveBookingRoomFn: func(ctx context.Context, sid, uid uuid.UUID) error {
+			return nil // allowed
+		},
+	}
+
+	h := NewBookingHandler(svc, zap.NewNop())
+	h.SetQueueService(qsMock)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	body := `{"user_id":"` + authUserID.String() + `","showtime_id":"` + showtimeID.String() + `","seat_ids":["` + uuid.New().String() + `"]}`
+	req := httptest.NewRequest(http.MethodPost, "/hold", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+	c.Set(testAuthUserKey, authUserID)
+	c.Set(testAuthRoleKey, "USER")
+
+	h.HoldSeats(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status=%d want 201 body=%s", w.Code, w.Body.String())
 	}
 }

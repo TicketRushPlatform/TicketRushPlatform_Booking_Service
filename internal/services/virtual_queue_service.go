@@ -23,14 +23,39 @@ type VirtualQueueService interface {
 	RequireActiveBookingRoom(ctx context.Context, showtimeID, userID uuid.UUID) error
 }
 
+// QueueManager is the subset of *redisqueue.Manager used by the virtual queue service.
+type QueueManager interface {
+	Join(ctx context.Context, showtimeID, userID uuid.UUID, maxActive int64) (*redisqueue.Status, error)
+	Heartbeat(ctx context.Context, showtimeID, userID uuid.UUID, maxActive int64) (*redisqueue.Status, error)
+	Leave(ctx context.Context, showtimeID, userID uuid.UUID, maxActive int64) error
+	Status(ctx context.Context, showtimeID, userID uuid.UUID, maxActive int64) (*redisqueue.Status, error)
+	HasActiveSession(ctx context.Context, showtimeID, userID uuid.UUID) (bool, error)
+}
+
 type virtualQueueService struct {
 	logger           *zap.Logger
-	queue            *redisqueue.Manager
+	queue            QueueManager
 	repo             repository.BookingRepository
 	fallbackActiveLn int
 }
 
 func NewVirtualQueueService(logger *zap.Logger, queue *redisqueue.Manager, repo repository.BookingRepository, fallbackActiveLimit int) VirtualQueueService {
+	if queue == nil {
+		return nil
+	}
+	if fallbackActiveLimit <= 0 {
+		fallbackActiveLimit = 50
+	}
+	return &virtualQueueService{
+		logger:           logger,
+		queue:            queue,
+		repo:             repo,
+		fallbackActiveLn: fallbackActiveLimit,
+	}
+}
+
+// newVirtualQueueServiceWithQM is a test-friendly constructor that accepts the QueueManager interface.
+func newVirtualQueueServiceWithQM(logger *zap.Logger, queue QueueManager, repo repository.BookingRepository, fallbackActiveLimit int) VirtualQueueService {
 	if queue == nil {
 		return nil
 	}
