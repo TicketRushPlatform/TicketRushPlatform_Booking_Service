@@ -102,24 +102,25 @@ func (l *concurrentSeatLocker) UnlockSeats(ctx context.Context, showtimeID uuid.
 }
 
 type bookingRepoMock struct {
-	mu                   sync.Mutex
-	holdSeatsFn          func(req dto.HoldSeatsRequest) (*models.Booking, error)
-	confirmBookingFn     func(bookingID uuid.UUID) (*models.Booking, error)
-	cancelBookingFn      func(bookingID uuid.UUID) (*models.Booking, error)
-	getBookingByIDFn     func(bookingID uuid.UUID) (*models.Booking, error)
-	getBookingsByUserFn  func(userID uuid.UUID, page, pageSize int) ([]models.Booking, int64, error)
-	getSeatsStatusFn     func(showtimeID uuid.UUID) ([]models.ShowTimeSeat, error)
-	getDashboardStatsFn  func() (*dto.DashboardStatsResponse, error)
-	releaseExpiredFn     func() (int64, error)
-	holdSeatsCallCount   int
-	confirmCallCount     int
-	cancelCallCount      int
-	getByIDCallCount     int
-	getByUserCallCount   int
-	getSeatsCallCount    int
-	getStatsCallCount    int
-	releaseCallCount     int
-	lastHoldSeatsRequest dto.HoldSeatsRequest
+	mu                         sync.Mutex
+	holdSeatsFn                func(req dto.HoldSeatsRequest) (*models.Booking, error)
+	confirmBookingFn           func(bookingID uuid.UUID) (*models.Booking, error)
+	cancelBookingFn            func(bookingID uuid.UUID) (*models.Booking, error)
+	getBookingByIDFn           func(bookingID uuid.UUID) (*models.Booking, error)
+	getBookingsByUserFn        func(userID uuid.UUID, page, pageSize int) ([]models.Booking, int64, error)
+	getSeatsStatusFn           func(showtimeID uuid.UUID) ([]models.ShowTimeSeat, error)
+	getDashboardStatsFn        func() (*dto.DashboardStatsResponse, error)
+	getShowtimeQueueSettingsFn func(showtimeID uuid.UUID) (bool, int, error)
+	releaseExpiredFn           func() (int64, error)
+	holdSeatsCallCount         int
+	confirmCallCount           int
+	cancelCallCount            int
+	getByIDCallCount           int
+	getByUserCallCount         int
+	getSeatsCallCount          int
+	getStatsCallCount          int
+	releaseCallCount           int
+	lastHoldSeatsRequest       dto.HoldSeatsRequest
 }
 
 func (m *bookingRepoMock) HoldSeats(req dto.HoldSeatsRequest) (*models.Booking, error) {
@@ -173,6 +174,13 @@ func (m *bookingRepoMock) GetDashboardStats() (*dto.DashboardStatsResponse, erro
 		return m.getDashboardStatsFn()
 	}
 	return &dto.DashboardStatsResponse{}, nil
+}
+
+func (m *bookingRepoMock) GetShowtimeQueueSettings(showtimeID uuid.UUID) (bool, int, error) {
+	if m.getShowtimeQueueSettingsFn != nil {
+		return m.getShowtimeQueueSettingsFn(showtimeID)
+	}
+	return false, 50, nil
 }
 
 func (m *bookingRepoMock) ReleaseExpiredHolds() (int64, error) {
@@ -862,11 +870,15 @@ func TestBookingService_OtherMethods(t *testing.T) {
 		{
 			name: "get seats status success and error",
 			run: func(t *testing.T, svc BookingService, mock *bookingRepoMock) {
+				priceAvailable := decimal.NewFromInt(100)
+				priceHolding := decimal.NewFromInt(150)
+				priceSold := decimal.NewFromInt(200)
 				mock.getSeatsStatusFn = func(showtimeID uuid.UUID) ([]models.ShowTimeSeat, error) {
 					return []models.ShowTimeSeat{
 						{
 							SeatID: uuid.New(),
 							Status: models.ShowTimeSeatStatusAvailable,
+							Price:  &priceAvailable,
 							Seat: models.Seat{
 								Row:       "A",
 								Number:    1,
@@ -876,6 +888,7 @@ func TestBookingService_OtherMethods(t *testing.T) {
 						{
 							SeatID: uuid.New(),
 							Status: models.ShowTimeSeatStatusHolding,
+							Price:  &priceHolding,
 							Seat: models.Seat{
 								Row:       "B",
 								Number:    2,
@@ -885,6 +898,7 @@ func TestBookingService_OtherMethods(t *testing.T) {
 						{
 							SeatID: uuid.New(),
 							Status: models.ShowTimeSeatStatusSold,
+							Price:  &priceSold,
 							Seat: models.Seat{
 								Row:       "C",
 								Number:    3,
@@ -899,6 +913,9 @@ func TestBookingService_OtherMethods(t *testing.T) {
 				}
 				if got.Total != 3 || got.Available != 1 || got.Holding != 1 || got.Sold != 1 {
 					t.Fatalf("unexpected counters: %+v", got)
+				}
+				if got.Seats[0].Price != "100" || got.Seats[1].Price != "150" || got.Seats[2].Price != "200" {
+					t.Fatalf("unexpected seat prices: %+v", got.Seats)
 				}
 
 				mock.getSeatsStatusFn = func(showtimeID uuid.UUID) ([]models.ShowTimeSeat, error) {

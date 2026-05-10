@@ -56,6 +56,8 @@ func NewConfig() Config {
 			Password: v.GetString("REDIS_PASSWORD"),
 			DB:       v.GetInt("REDIS_DB"),
 			TTL:      time.Duration(v.GetInt("REDIS_SEAT_LOCK_TTL_SECONDS")) * time.Second,
+			QueueTTL: time.Duration(v.GetInt("REDIS_QUEUE_TTL_SECONDS")) * time.Second,
+			QueueActiveLimit: v.GetInt("REDIS_QUEUE_ACTIVE_LIMIT"),
 		},
 		Auth: AuthConfig{
 			JWTSecret:    getStringOrDefault(v.GetString("JWT_SECRET"), "dev-only-secret"),

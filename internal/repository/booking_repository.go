@@ -24,6 +24,7 @@ type BookingRepository interface {
 	GetSeatsStatus(showtimeID uuid.UUID) ([]models.ShowTimeSeat, error)
 	ReleaseExpiredHolds() (int64, error)
 	GetDashboardStats() (*dto.DashboardStatsResponse, error)
+	GetShowtimeQueueSettings(showtimeID uuid.UUID) (enabled bool, limit int, err error)
 }
 
 type bookingRepository struct {
@@ -38,6 +39,23 @@ func NewBookingRepository(db *gorm.DB, logger *zap.Logger) BookingRepository {
 	}
 }
 
+func (r *bookingRepository) GetShowtimeQueueSettings(showtimeID uuid.UUID) (bool, int, error) {
+	var row struct {
+		QueueEnabled bool
+		QueueLimit   int
+	}
+	if err := r.db.Model(&models.ShowTime{}).
+		Select("queue_enabled", "queue_limit").
+		Where("id = ?", showtimeID).
+		Take(&row).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return false, 0, apperror.NewNotFound("showtime not found")
+		}
+		return false, 0, apperror.NewInternal("failed to load showtime queue settings", err)
+	}
+	return row.QueueEnabled, row.QueueLimit, nil
+}
+
 func (r *bookingRepository) GetSeatsStatus(showtimeID uuid.UUID) ([]models.ShowTimeSeat, error) {
 	var seats []models.ShowTimeSeat
 
@@ -50,6 +68,32 @@ func (r *bookingRepository) GetSeatsStatus(showtimeID uuid.UUID) ([]models.ShowT
 
 	if err != nil {
 		return nil, apperror.NewInternal("failed to get seats status", err)
+	}
+
+	if len(seats) > 0 {
+		seatIDs := make([]uuid.UUID, 0, len(seats))
+		for _, seat := range seats {
+			seatIDs = append(seatIDs, seat.SeatID)
+		}
+
+		var prices []models.SeatPricing
+		if err := r.db.
+			Where("show_time_id = ? AND seat_id IN ?", showtimeID, seatIDs).
+			Find(&prices).Error; err != nil {
+			return nil, apperror.NewInternal("failed to get seat pricing", err)
+		}
+
+		priceMap := make(map[uuid.UUID]decimal.Decimal, len(prices))
+		for _, p := range prices {
+			priceMap[p.SeatID] = p.Price
+		}
+
+		for i := range seats {
+			if price, ok := priceMap[seats[i].SeatID]; ok {
+				priceCopy := price
+				seats[i].Price = &priceCopy
+			}
+		}
 	}
 
 	for i := range seats {
@@ -232,9 +276,9 @@ func (r *bookingRepository) ConfirmBooking(bookingID uuid.UUID) (*models.Booking
 		if err := tx.Model(&models.Booking{}).
 			Where("id = ?", booking.ID).
 			Updates(map[string]interface{}{
-			"status":     models.BookingStatusPaid,
-			"expires_at": nil,
-		}).Error; err != nil {
+				"status":     models.BookingStatusPaid,
+				"expires_at": nil,
+			}).Error; err != nil {
 			return fmt.Errorf("failed to update booking status: %v", err)
 		}
 
@@ -298,9 +342,9 @@ func (r *bookingRepository) CancelBooking(bookingID uuid.UUID) (*models.Booking,
 		if err := tx.Model(&models.Booking{}).
 			Where("id = ?", booking.ID).
 			Updates(map[string]interface{}{
-			"status":     models.BookingStatusCanceled,
-			"expires_at": nil,
-		}).Error; err != nil {
+				"status":     models.BookingStatusCanceled,
+				"expires_at": nil,
+			}).Error; err != nil {
 			return fmt.Errorf("failed to cancel booking: %v", err)
 		}
 

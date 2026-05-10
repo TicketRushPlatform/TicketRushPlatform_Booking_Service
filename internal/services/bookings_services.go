@@ -240,6 +240,9 @@ func (b *bookingService) GetSeatsStatus(showtimeID uuid.UUID) (*dto.SeatsStatusR
 			Status:    string(s.Status),
 			ExpiresAt: s.ExpiresAt,
 		}
+		if s.Price != nil {
+			seatDTO.Price = s.Price.String()
+		}
 
 		response.Seats = append(response.Seats, seatDTO)
 

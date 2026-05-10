@@ -1,11 +1,17 @@
 package dto
 
-import "github.com/google/uuid"
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
 
 type HoldSeatsRequest struct {
 	UserID     uuid.UUID   `json:"user_id" binding:"required"`
 	ShowtimeID uuid.UUID   `json:"showtime_id" binding:"required"`
 	SeatIDs    []uuid.UUID `json:"seat_ids" binding:"required,min=1"`
+	// HoldExpiresAt is set by the HTTP handler from the booking-room session deadline (not from JSON).
+	HoldExpiresAt time.Time `json:"-"`
 }
 
 type ConfirmBookingRequest struct {
