@@ -38,6 +38,8 @@ type Config struct {
 	Password string
 	DB       int
 	TTL      time.Duration
+	QueueTTL time.Duration
+	QueueActiveLimit int
 }
 
 type SeatLocker struct {

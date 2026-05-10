@@ -33,6 +33,15 @@ type SeatStatusDTO struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
+type QueueStatusResponse struct {
+	ShowtimeID   string `json:"showtime_id"`
+	UserID       string `json:"user_id"`
+	Position     int64  `json:"position"`
+	TotalWaiting int64  `json:"total_waiting"`
+	InQueue      bool   `json:"in_queue"`
+	CanEnter     bool   `json:"can_enter"`
+}
+
 type SeatsStatusResponse struct {
 	ShowtimeID string          `json:"showtime_id"`
 	Seats      []SeatStatusDTO `json:"seats"`

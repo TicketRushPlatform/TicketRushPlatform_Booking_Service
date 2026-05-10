@@ -35,6 +35,9 @@ type ShowTime struct {
 	StartTime time.Time
 	EndTime   time.Time
 
+	QueueEnabled bool `gorm:"not null;default:false"`
+	QueueLimit   int  `gorm:"not null;default:50"`
+
 	ShowTimeSeats []ShowTimeSeat `gorm:"foreignKey:ShowTimeID"`
 }
 
@@ -52,6 +55,8 @@ type ShowTimeSeat struct {
 	ShowTime ShowTime `gorm:"foreignKey:ShowTimeID;references:ID"`
 	Booking  *Booking `gorm:"foreignKey:BookingID;references:ID"`
 	Seat     Seat     `gorm:"foreignKey:SeatID;references:ID;constraint:OnDelete:CASCADE"`
+	// Price is hydrated at query time for seat status APIs.
+	Price *decimal.Decimal `gorm:"-"`
 }
 
 type Booking struct {

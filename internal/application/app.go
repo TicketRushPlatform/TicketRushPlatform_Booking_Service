@@ -8,6 +8,7 @@ import (
 	"booking_api/internal/infrastructure/logger"
 	"booking_api/internal/infrastructure/redislock"
 	"booking_api/internal/middleware"
+	"booking_api/internal/redisqueue"
 	"booking_api/internal/repository"
 	"booking_api/internal/server"
 	"booking_api/internal/services"
@@ -53,6 +54,7 @@ func NewApp(cfg config.Config) (*App, error) {
 
 	// ---- Wire dependencies ----
 	var seatLocker *redislock.SeatLocker
+	var queueManager *redisqueue.Manager
 	if cfg.Redis.Addr != "" {
 		redisClient := redislock.NewClient(cfg.Redis)
 		pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -67,13 +69,16 @@ func NewApp(cfg config.Config) (*App, error) {
 			zap.Int("db", cfg.Redis.DB),
 		)
 		seatLocker = redislock.NewSeatLocker(redisClient, cfg.Redis.TTL)
+		queueManager = redisqueue.NewManager(redisClient, cfg.Redis.QueueTTL, zapLogger)
 	} else {
 		zapLogger.Info("redis disabled for seat locking (REDIS_ADDR empty); holds use database only")
 	}
 
 	bookingRepo := repository.NewBookingRepository(db, zapLogger)
 	bookingService := services.NewBookingServiceWithSeatLocker(zapLogger, bookingRepo, seatLocker)
+	virtualQueueService := services.NewVirtualQueueService(zapLogger, queueManager, bookingRepo, cfg.Redis.QueueActiveLimit)
 	bookingHandler := handler.NewBookingHandler(bookingService, zapLogger)
+	bookingHandler.SetQueueService(virtualQueueService)
 	bookingHandler.StartExpiredHoldReleaser(15 * time.Second)
 
 	// ---- Register middleware ----

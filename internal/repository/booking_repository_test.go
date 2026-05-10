@@ -126,6 +126,28 @@ func TestNewBookingRepository(t *testing.T) {
 	}
 }
 
+func TestBookingRepository_GetShowtimeQueueSettings(t *testing.T) {
+	repo := setupRepo(t)
+	showtimeID, _, _ := seedShowtimeWithSeats(t, repo, 1)
+	r := repo.(*bookingRepository)
+	if err := r.db.Model(&models.ShowTime{}).Where("id = ?", showtimeID).Updates(map[string]interface{}{
+		"queue_enabled": true,
+		"queue_limit":   12,
+	}).Error; err != nil {
+		t.Fatalf("updates: %v", err)
+	}
+	enabled, lim, err := repo.GetShowtimeQueueSettings(showtimeID)
+	if err != nil {
+		t.Fatalf("GetShowtimeQueueSettings: %v", err)
+	}
+	if !enabled || lim != 12 {
+		t.Fatalf("queue settings: enabled=%v limit=%d", enabled, lim)
+	}
+	if _, _, err := repo.GetShowtimeQueueSettings(uuid.New()); err == nil {
+		t.Fatalf("expected error for unknown showtime")
+	}
+}
+
 func TestBookingRepository_HoldAndGetBooking(t *testing.T) {
 	repo := setupRepo(t)
 	showtimeID, _, seatIDs := seedShowtimeWithSeats(t, repo, 2)
@@ -226,6 +248,9 @@ func TestBookingRepository_ConfirmBooking(t *testing.T) {
 	for _, s := range seats {
 		if s.Status != models.ShowTimeSeatStatusSold {
 			t.Fatalf("expected SOLD seat status")
+		}
+		if s.Price == nil || !s.Price.Equal(decimal.NewFromInt(100)) {
+			t.Fatalf("expected seat price 100, got %v", s.Price)
 		}
 	}
 

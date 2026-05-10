@@ -20,9 +20,10 @@ import (
 )
 
 type BookingHandler struct {
-	service services.BookingService
-	logger  *zap.Logger
-	seatHub *realtime.SeatHub
+	service      services.BookingService
+	queueService services.VirtualQueueService
+	logger       *zap.Logger
+	seatHub      *realtime.SeatHub
 
 	releaserStop chan struct{}
 	releaserOnce sync.Once
@@ -36,6 +37,10 @@ func NewBookingHandler(service services.BookingService, logger *zap.Logger) *Boo
 
 		releaserStop: make(chan struct{}),
 	}
+}
+
+func (h *BookingHandler) SetQueueService(queueService services.VirtualQueueService) {
+	h.queueService = queueService
 }
 
 func (h *BookingHandler) StartExpiredHoldReleaser(interval time.Duration) {
@@ -85,6 +90,10 @@ func (h *BookingHandler) RegisterRoutes(rg *gin.RouterGroup) {
 	{
 		showtimes.GET("/:showtime_id/seats", h.GetSeatsStatus)
 		showtimes.GET("/:showtime_id/seats/ws", h.StreamSeatsStatus)
+		showtimes.POST("/:showtime_id/queue/join", h.JoinQueue)
+		showtimes.POST("/:showtime_id/queue/heartbeat", h.HeartbeatQueue)
+		showtimes.POST("/:showtime_id/queue/leave", h.LeaveQueue)
+		showtimes.GET("/:showtime_id/queue/status", h.GetQueueStatus)
 	}
 
 	admin := rg.Group("/admin", middleware.RequireAdmin())
@@ -123,6 +132,13 @@ func (h *BookingHandler) HoldSeats(c *gin.Context) {
 		return
 	}
 	req.UserID = authUserID
+
+	if h.queueService != nil {
+		if err := h.queueService.RequireActiveBookingRoom(c.Request.Context(), req.ShowtimeID, authUserID); err != nil {
+			h.handleError(c, err)
+			return
+		}
+	}
 
 	booking, err := h.service.HoldSeats(req)
 	if err != nil {
@@ -399,6 +415,98 @@ func (h *BookingHandler) GetSeatsStatus(c *gin.Context) {
 	})
 }
 
+func (h *BookingHandler) JoinQueue(c *gin.Context) {
+	showtimeID, userID, ok := h.parseQueueAuth(c)
+	if !ok {
+		return
+	}
+	if h.queueService == nil {
+		c.JSON(http.StatusServiceUnavailable, dto.ErrorResponse{
+			Code:    http.StatusServiceUnavailable,
+			Message: "virtual queue is not enabled",
+		})
+		return
+	}
+
+	status, err := h.queueService.Join(c.Request.Context(), showtimeID, userID)
+	if err != nil {
+		h.handleError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, dto.SuccessResponse{
+		Message: "joined queue successfully",
+		Data:    status,
+	})
+}
+
+func (h *BookingHandler) HeartbeatQueue(c *gin.Context) {
+	showtimeID, userID, ok := h.parseQueueAuth(c)
+	if !ok {
+		return
+	}
+	if h.queueService == nil {
+		c.JSON(http.StatusServiceUnavailable, dto.ErrorResponse{
+			Code:    http.StatusServiceUnavailable,
+			Message: "virtual queue is not enabled",
+		})
+		return
+	}
+
+	status, err := h.queueService.Heartbeat(c.Request.Context(), showtimeID, userID)
+	if err != nil {
+		h.handleError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, dto.SuccessResponse{
+		Data: status,
+	})
+}
+
+func (h *BookingHandler) LeaveQueue(c *gin.Context) {
+	showtimeID, userID, ok := h.parseQueueAuth(c)
+	if !ok {
+		return
+	}
+	if h.queueService == nil {
+		c.JSON(http.StatusServiceUnavailable, dto.ErrorResponse{
+			Code:    http.StatusServiceUnavailable,
+			Message: "virtual queue is not enabled",
+		})
+		return
+	}
+
+	if err := h.queueService.Leave(c.Request.Context(), showtimeID, userID); err != nil {
+		h.handleError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, dto.SuccessResponse{
+		Message: "left queue successfully",
+	})
+}
+
+func (h *BookingHandler) GetQueueStatus(c *gin.Context) {
+	showtimeID, userID, ok := h.parseQueueAuth(c)
+	if !ok {
+		return
+	}
+	if h.queueService == nil {
+		c.JSON(http.StatusServiceUnavailable, dto.ErrorResponse{
+			Code:    http.StatusServiceUnavailable,
+			Message: "virtual queue is not enabled",
+		})
+		return
+	}
+
+	status, err := h.queueService.Status(c.Request.Context(), showtimeID, userID)
+	if err != nil {
+		h.handleError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, dto.SuccessResponse{
+		Data: status,
+	})
+}
+
 var seatStatusUpgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
@@ -538,6 +646,27 @@ func (h *BookingHandler) buildSeatsPayload(showtimeID uuid.UUID) ([]byte, error)
 		"type": "seat_status",
 		"data": status,
 	})
+}
+
+func (h *BookingHandler) parseQueueAuth(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
+	showtimeID, err := uuid.Parse(c.Param("showtime_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.ErrorResponse{
+			Code:    http.StatusBadRequest,
+			Message: "invalid showtime ID",
+		})
+		return uuid.Nil, uuid.Nil, false
+	}
+
+	userID, ok := middleware.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, dto.ErrorResponse{
+			Code:    http.StatusUnauthorized,
+			Message: "authenticated user was not found in request context",
+		})
+		return uuid.Nil, uuid.Nil, false
+	}
+	return showtimeID, userID, true
 }
 
 // ---------- Error Handler ----------
