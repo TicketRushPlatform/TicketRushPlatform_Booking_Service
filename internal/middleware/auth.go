@@ -28,7 +28,7 @@ const (
 
 func RequireAuth(cfg AuthConfig) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if strings.HasSuffix(c.Request.URL.Path, "/ws") {
+		if isPublicBookingRoute(c.Request.Method, c.Request.URL.Path) {
 			c.Next()
 			return
 		}
@@ -72,6 +72,21 @@ func RequireAuth(cfg AuthConfig) gin.HandlerFunc {
 		c.Set(contextRole, strings.ToUpper(strings.TrimSpace(claims.Role)))
 		c.Next()
 	}
+}
+
+func isPublicBookingRoute(method, path string) bool {
+	if strings.HasSuffix(path, "/ws") {
+		return true
+	}
+	if method != http.MethodGet {
+		return false
+	}
+
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 3 {
+		return false
+	}
+	return parts[len(parts)-3] == "showtimes" && parts[len(parts)-1] == "seats"
 }
 
 func RequireAdmin() gin.HandlerFunc {

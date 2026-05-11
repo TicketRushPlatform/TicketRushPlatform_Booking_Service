@@ -128,6 +128,27 @@ func TestRequireAuth(t *testing.T) {
 	}
 }
 
+func TestRequireAuth_AllowsPublicSeatStatusReads(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(RequireAuth(AuthConfig{JWTSecret: "test-secret", JWTAlgorithm: "HS256"}))
+	r.GET("/api/v1/showtimes/:showtime_id/seats", func(c *gin.Context) { c.Status(http.StatusOK) })
+	r.POST("/api/v1/showtimes/:showtime_id/seats", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	showtimeID := uuid.NewString()
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/showtimes/"+showtimeID+"/seats", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET seat status without auth status=%d want 200 body=%s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/v1/showtimes/"+showtimeID+"/seats", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("POST seat status without auth status=%d want 401 body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestRequireAdmin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
