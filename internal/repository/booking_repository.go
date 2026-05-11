@@ -25,6 +25,7 @@ type BookingRepository interface {
 	ReleaseExpiredHolds() (int64, error)
 	GetDashboardStats() (*dto.DashboardStatsResponse, error)
 	GetShowtimeQueueSettings(showtimeID uuid.UUID) (enabled bool, limit int, err error)
+	GetMaxTicketsPerBooking(showtimeID uuid.UUID) (*int, error)
 }
 
 type bookingRepository struct {
@@ -54,6 +55,27 @@ func (r *bookingRepository) GetShowtimeQueueSettings(showtimeID uuid.UUID) (bool
 		return false, 0, apperror.NewInternal("failed to load showtime queue settings", err)
 	}
 	return row.QueueEnabled, row.QueueLimit, nil
+}
+
+func (r *bookingRepository) GetMaxTicketsPerBooking(showtimeID uuid.UUID) (*int, error) {
+	var row struct {
+		MaxTicketsPerBooking *int `gorm:"column:max_tickets_per_booking"`
+	}
+
+	err := r.db.
+		Table("show_times st").
+		Select("e.max_tickets_per_booking").
+		Joins("JOIN events e ON e.id = st.event_id").
+		Where("st.id = ? AND st.deleted_at IS NULL", showtimeID).
+		Take(&row).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, apperror.NewNotFound("showtime not found")
+		}
+		return nil, apperror.NewInternal("failed to load max tickets per booking", err)
+	}
+
+	return row.MaxTicketsPerBooking, nil
 }
 
 func (r *bookingRepository) GetSeatsStatus(showtimeID uuid.UUID) ([]models.ShowTimeSeat, error) {

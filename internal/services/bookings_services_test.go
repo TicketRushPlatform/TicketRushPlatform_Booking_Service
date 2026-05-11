@@ -111,6 +111,7 @@ type bookingRepoMock struct {
 	getSeatsStatusFn           func(showtimeID uuid.UUID) ([]models.ShowTimeSeat, error)
 	getDashboardStatsFn        func() (*dto.DashboardStatsResponse, error)
 	getShowtimeQueueSettingsFn func(showtimeID uuid.UUID) (bool, int, error)
+	getMaxTicketsPerBookingFn  func(showtimeID uuid.UUID) (*int, error)
 	releaseExpiredFn           func() (int64, error)
 	holdSeatsCallCount         int
 	confirmCallCount           int
@@ -119,6 +120,7 @@ type bookingRepoMock struct {
 	getByUserCallCount         int
 	getSeatsCallCount          int
 	getStatsCallCount          int
+	getMaxTicketsCallCount     int
 	releaseCallCount           int
 	lastHoldSeatsRequest       dto.HoldSeatsRequest
 }
@@ -181,6 +183,16 @@ func (m *bookingRepoMock) GetShowtimeQueueSettings(showtimeID uuid.UUID) (bool, 
 		return m.getShowtimeQueueSettingsFn(showtimeID)
 	}
 	return false, 50, nil
+}
+
+func (m *bookingRepoMock) GetMaxTicketsPerBooking(showtimeID uuid.UUID) (*int, error) {
+	m.mu.Lock()
+	m.getMaxTicketsCallCount++
+	m.mu.Unlock()
+	if m.getMaxTicketsPerBookingFn != nil {
+		return m.getMaxTicketsPerBookingFn(showtimeID)
+	}
+	return nil, nil
 }
 
 func (m *bookingRepoMock) ReleaseExpiredHolds() (int64, error) {
@@ -313,6 +325,23 @@ func TestBookingService_HoldSeats(t *testing.T) {
 			wantErr:       "failed after retries",
 			wantCalls:     maxDeadlockRetries,
 			wantSortedIDs: []uuid.UUID{seat1, seat2},
+		},
+		{
+			name: "exceeds max tickets per user/showtime",
+			mock: func() *bookingRepoMock {
+				max := 1
+				return &bookingRepoMock{
+					getMaxTicketsPerBookingFn: func(showtimeID uuid.UUID) (*int, error) {
+						return &max, nil
+					},
+					holdSeatsFn: func(req dto.HoldSeatsRequest) (*models.Booking, error) {
+						t.Fatalf("repository HoldSeats should not be called when exceeding max tickets")
+						return nil, nil
+					},
+				}
+			}(),
+			wantErr:   "maximum 1 tickets",
+			wantCalls: 0,
 		},
 	}
 

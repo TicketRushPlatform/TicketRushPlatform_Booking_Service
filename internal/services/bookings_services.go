@@ -82,6 +82,24 @@ func (b *bookingService) HoldSeats(req dto.HoldSeatsRequest) (*dto.BookingRespon
 
 	b.logger.Debug("sorted seats", zap.Any("sorted_seats", sortedSeats))
 
+	for i := 1; i < len(req.SeatIDs); i++ {
+		if req.SeatIDs[i] == req.SeatIDs[i-1] {
+			return nil, apperror.NewBadRequest("duplicate seat id in request")
+		}
+	}
+
+	maxTickets, err := b.repository.GetMaxTicketsPerBooking(req.ShowtimeID)
+	if err != nil {
+		return nil, err
+	}
+	if maxTickets != nil && *maxTickets > 0 {
+		if len(req.SeatIDs) > *maxTickets {
+			return nil, apperror.NewBadRequest(
+				fmt.Sprintf("maximum %d tickets per user for this showtime", *maxTickets),
+			)
+		}
+	}
+
 	var lockOwner string
 	if b.seatLocker != nil {
 		lockOwner = uuid.NewString()
@@ -108,7 +126,6 @@ func (b *bookingService) HoldSeats(req dto.HoldSeatsRequest) (*dto.BookingRespon
 	}
 
 	var booking *models.Booking
-	var err error
 
 	for i := 0; i < maxDeadlockRetries; i++ {
 		booking, err = b.repository.HoldSeats(req)
