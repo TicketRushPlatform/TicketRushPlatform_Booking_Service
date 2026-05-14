@@ -8,6 +8,7 @@ import (
 	"booking_api/internal/infrastructure/logger"
 	"booking_api/internal/infrastructure/redislock"
 	"booking_api/internal/middleware"
+	"booking_api/internal/observability"
 	"booking_api/internal/redisqueue"
 	"booking_api/internal/repository"
 	"booking_api/internal/server"
@@ -83,9 +84,12 @@ func NewApp(cfg config.Config) (*App, error) {
 
 	// ---- Register middleware ----
 	router := srv.Router()
+	metrics := observability.NewMetrics()
 	router.Use(middleware.CORS())
 	router.Use(middleware.RequestID())
+	router.Use(metrics.Middleware())
 	router.Use(middleware.RequestLogger(zapLogger))
+	router.GET("/metrics", metrics.Handler())
 	router.Use(middleware.RequireAuth(middleware.AuthConfig{
 		JWTSecret:    cfg.Auth.JWTSecret,
 		JWTAlgorithm: cfg.Auth.JWTAlgorithm,
